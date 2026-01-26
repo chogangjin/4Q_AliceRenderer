@@ -1569,7 +1569,6 @@ namespace Alice
 					DeferredRenderSystem* deferred = pImpl->m_deferredRenderSystem.get();
 					ID3D11ShaderResourceView* sceneSRV = deferred->GetSceneColorSRV();
 					deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
-					deferred->RenderPostProcess(backBufferRTV, viewport);
 				}
 
 				// 파티클 오버레이 합성 (톤매핑 후)
@@ -1602,15 +1601,14 @@ namespace Alice
 				{
 					DeferredRenderSystem* deferred = pImpl->m_deferredRenderSystem.get();
 					ID3D11ShaderResourceView* sceneSRV = deferred->GetSceneColorSRV();
-					//if (deferred->GetBloomSettings().enabled)
-					//{
-					//	deferred->RenderBloomPass(sceneSRV, backBufferRTV, viewport);
-					//}
-					//else
-					//{
-						//deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
-					deferred->RenderPostProcess(backBufferRTV, viewport);
-
+					if (deferred->GetBloomSettings().enabled)
+					{
+						deferred->RenderBloomPass(sceneSRV, backBufferRTV, viewport);
+					}
+					else
+					{
+						deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
+					}
 					// UI 렌더링: Post-processing 이후
 					pImpl->m_uiWorld.Render();  // D2D → UI 텍스처 렌더링
 					deferred->RenderUI(pImpl->m_uiWorld, backBufferRTV, viewport);

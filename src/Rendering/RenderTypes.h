@@ -22,19 +22,13 @@ namespace Alice
     {
         float exposure = 0.0f;        // Exposure 값 (기본값: 0 = 1.0배)
         float maxHDRNits = 1000.0f;   // HDR 모니터 최대 밝기 (nits)
-        
-        // Color Grading 파라미터 (Unreal Engine 스타일)
-        float saturation = 1.0f;      // 채도 (0.0 = 흑백, 1.0 = 원본, 2.0 = 과포화)
-        float contrast = 1.0f;        // 대비 (0.0 = 회색, 1.0 = 원본, 2.0 = 고대비)
-        float gamma = 1.0f;           // 감마 보정 (0.1~3.0, 1.0 = 원본, <1 = 밝게, >1 = 어둡게)
     };
 
     /// Bloom 파라미터 구조체
     struct BloomSettings
     {
         bool enabled = true;          // Bloom 활성화
-        float intensity = 0.5f;      // Bloom 합성 강도 (최종 합성 시 적용)
-        float gaussianIntensity = 1.0f; // Gaussian 블러 강도 (블러 단계에서 적용)
+        float intensity = 0.5f;      // 합성 강도
         float threshold = 1.0f;      // 밝기 추출 기준
         float knee = 0.5f;            // Soft threshold (0~1)
         float radius = 1.0f;          // Blur 크기 (sigma)
@@ -160,19 +154,14 @@ namespace Alice
 	{
 		float exposure;
 		float maxHDRNits;
-		float saturation;      // Color Grading: 채도
-		float contrast;         // Color Grading: 대비
-
-		float gamma;            // Color Grading: 감마
-		DirectX::XMFLOAT3 padding;          // 16-byte alignment
+		float padding[2];
 	};
 
 	struct BloomCB
 	{
 		float threshold;
 		float knee;
-		float bloomIntensity;      // Bloom 합성 강도 (Composite 패스에서 사용)
-		float gaussianIntensity;   // Gaussian 블러 강도 (Blur 패스에서 사용)
+		float intensity;
 		float radius;
 		DirectX::XMFLOAT2 texelSize;
 		int downsample;
