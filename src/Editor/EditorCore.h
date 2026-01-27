@@ -149,7 +149,9 @@ namespace Alice
                           bool& pvdEnabled,
                           std::string& pvdHost,
                           int& pvdPort,
-                          class UIWorldManager* uiWorldManager = nullptr);
+                          class UIWorldManager* uiWorldManager,
+						  bool& isDebugDraw
+						  );
 
 		template<typename T>
 		void DrawEngineComponent(const char* label, T* comp, std::function<void()> removeFn, const EntityId& _selectedEntity, const std::string& compTypeName)
@@ -267,6 +269,11 @@ namespace Alice
 		void DrawInspectorPhysicsSceneSettings(World& world, const EntityId& _selectedEntity);
 		void DrawInspectorTerrainHeightField(World& world, const EntityId& _selectedEntity);
 		void DrawInspectorJoint(World& world, const EntityId& _selectedEntity);
+		void DrawInspectorAttackDriver(World& world, const EntityId& _selectedEntity);
+		void DrawInspectorHurtbox(World& world, const EntityId& _selectedEntity);
+		void DrawInspectorWeaponTrace(World& world, const EntityId& _selectedEntity);
+		void DrawInspectorSocketAttachment(World& world, const EntityId& _selectedEntity);
+		void DrawInspectorSocketComponent(World& world, const EntityId& _selectedEntity);
 
         /// 프로젝트 뷰에서 사용할 간단한 디렉터리 트리 그리기 함수입니다.
         void DrawDirectoryNode(World& world,

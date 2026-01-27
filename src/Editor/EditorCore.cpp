@@ -21,9 +21,16 @@
 #include "Core/ComponentRegistry.h"  // RTTR 등록 코드 포함
 #include "Core/EditorComponentRegistry.h"
 #include "Core/JsonRttr.h"
-#include "Components/AdvancedAnimationComponent.h"
+#include "Core/SocketSerialization.h"
 #include "Components/SkinnedAnimationComponent.h"
 #include "Components/SkinnedMeshComponent.h"
+#include "Components/AttackDriverComponent.h"
+#include "Components/HurtboxComponent.h"
+#include "Components/WeaponTraceComponent.h"
+#include "Components/SocketAttachmentComponent.h"
+#include "Components/IDComponent.h"
+#include "Components/SocketComponent.h"
+#include <cstdio>
 #include <set>
 #include "Components/CameraComponent.h"
 #include "Components/CameraFollowComponent.h"
@@ -33,6 +40,7 @@
 #include "Components/CameraBlendComponent.h"
 #include "Components/CameraInputComponent.h"
 #include "Editor/Blueprint/AnimBlueprintEditor.h"
+#include "Game/CombatPhysicsLayers.h"
 
 // ImGui
 #include "imgui.h"
@@ -334,6 +342,21 @@ namespace Alice
 					outEntity["SkinnedAnimation"] = JsonRttr::ToJsonObject(inst);
 				}
 
+				// Socket
+				if (const auto* socketComp = world.GetComponent<SocketComponent>(id); socketComp)
+				{
+					outEntity["Socket"] = SocketSerialization::SocketComponentToJson(*socketComp);
+				}
+
+				// SocketAttachment
+				if (const auto* socketAttach = world.GetComponent<SocketAttachmentComponent>(id); socketAttach)
+				{
+					rttr::instance inst = const_cast<SocketAttachmentComponent&>(*socketAttach);
+					JsonRttr::json obj = JsonRttr::ToJsonObject(inst);
+					obj["ownerGuid"] = std::to_string(socketAttach->ownerGuid);
+					outEntity["SocketAttachment"] = obj;
+				}
+
 				// Camera components
 				if (const auto* cam = world.GetComponent<CameraComponent>(id); cam)
 				{
@@ -549,6 +572,28 @@ namespace Alice
 					SkinnedAnimationComponent& sa = world.AddComponent<SkinnedAnimationComponent>(id);
 					rttr::instance inst = sa;
 					if (!JsonRttr::FromJsonObject(inst, *itSA)) return false;
+				}
+
+				// Socket
+				auto itSocket = e.find("Socket");
+				if (itSocket != e.end() && itSocket->is_object())
+				{
+					SocketComponent& sc = world.AddComponent<SocketComponent>(id);
+					if (!SocketSerialization::JsonToSocketComponent(*itSocket, sc)) return false;
+				}
+
+				// SocketAttachment
+				auto itSAc = e.find("SocketAttachment");
+				if (itSAc != e.end() && itSAc->is_object())
+				{
+					SocketAttachmentComponent& sa = world.AddComponent<SocketAttachmentComponent>(id);
+					if (auto itGuid = itSAc->find("ownerGuid"); itGuid != itSAc->end())
+						sa.ownerGuid = ParseGuid(*itGuid);
+
+					JsonRttr::json copy = *itSAc;
+					copy.erase("ownerGuid");
+					rttr::instance inst = sa;
+					if (!JsonRttr::FromJsonObject(inst, copy)) return false;
 				}
 
 				// Camera components
@@ -1851,7 +1896,8 @@ namespace Alice
 		bool& pvdEnabled,
 		std::string& pvdHost,
 		int& pvdPort,
-		UIWorldManager* uiWorldManager)
+		UIWorldManager* uiWorldManager,
+		bool& isDebugDraw)
 	{
 		// UIWorldManager 저장
 		m_uiWorldManager = uiWorldManager;
@@ -2061,6 +2107,9 @@ namespace Alice
 						{"Monkey",    "../Assets/Fbx/Monkey.fbxasset"},
 						//{"Box",       "../Assets/Fbx/Box.fbxasset"},
 						{"Cube(FBX)", "../Assets/Fbx/Cube.fbxasset"},
+						{"Sphere(FBX)", "../Assets/Fbx/Sphere.fbxasset"},
+						{"Quad(FBX)", "../Assets/Fbx/Quad.fbxasset"},
+						{"Corn(FBX)", "../Assets/Fbx/Corn.fbxasset"}
 					};
 
 					// 고정 목록 표시
@@ -2265,6 +2314,14 @@ namespace Alice
 
 			ImGui::Separator();
 			ImGui::Text("DeltaTime: %.3f  FPS: %.1f", deltaTime, fps);
+
+			ImGui::Separator();
+			// 렌더링 시스템 선택 체크박스
+			ImGui::Checkbox("Show DebugDraw", &isDebugDraw);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("체크: 디버그 라인 켜기\n해제: 디버그 라인 끄기");
+			}
 
 			ImGui::Separator();
 			// 렌더링 시스템 선택 체크박스
@@ -3873,7 +3930,6 @@ namespace Alice
 
 				// 엔티티 선택 (Gizmo 위에 있지 않을 때만)
 				// 최종 빌드(Release)에서는 뷰포트 피커가 작동하지 않도록 함
-#ifdef _DEBUG
 				if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 				{
 					// Gizmo 위에 있지 않고 사용 중이 아닐 때만 선택 처리
@@ -3903,7 +3959,6 @@ namespace Alice
 							}
 						}
 					}
-#endif // _DEBUG
 			}
 			else
 			{
@@ -5049,7 +5104,31 @@ namespace Alice
 				DrawInspectorJoint(world, _selectedEntity);
 				continue;
 			}
-
+			else if (typeName == "AttackDriverComponent")
+			{
+				DrawInspectorAttackDriver(world, _selectedEntity);
+				continue;
+			}
+			else if (typeName == "HurtboxComponent")
+			{
+				DrawInspectorHurtbox(world, _selectedEntity);
+				continue;
+			}
+			else if (typeName == "WeaponTraceComponent")
+			{
+				DrawInspectorWeaponTrace(world, _selectedEntity);
+				continue;
+			}
+			else if (typeName == "SocketAttachmentComponent")
+			{
+				DrawInspectorSocketAttachment(world, _selectedEntity);
+				continue;
+			}
+			else if (typeName == "SocketComponent")
+			{
+				DrawInspectorSocketComponent(world, _selectedEntity);
+				continue;
+			}
 			// 일반 컴포넌트: 레지스트리 기반 렌더링
 			if (!d.has(world, _selectedEntity)) continue;
 
@@ -6282,6 +6361,14 @@ namespace Alice
 					return;
 				}
 
+				if (ImGui::Button("Apply Combat Defaults"))
+				{
+					CombatPhysicsLayers::ApplyDefaultCombatLayerMatrix(*settings);
+					settings->filterRevision++;
+					changed = true;
+					g_SceneDirty = true;
+				}
+
 				// 기본 프로퍼티는 ReflectionUI로
 				// PhysicsSettings 편집 이벤트 처리
 				static EntityId lastEditedPhysicsSettingsEntity = InvalidEntityId;
@@ -7017,7 +7104,18 @@ namespace Alice
 			if (ImGui::CollapsingHeader("Camera Follow", ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				bool changed = false;
-				changed |= ReflectionUI::RenderInspector(*comp, nullptr, &world).changed;
+				
+				// 런타임 상태 필터 (직렬화/편집 대상 아님)
+				auto filter = [](const std::string& propName) -> bool {
+					// 런타임 상태 필드들은 인스펙터에서 제외
+					return propName != "lockOnTargetId" && 
+					       propName != "lockOnActive" && 
+					       propName != "initialized" &&
+					       propName != "smoothedPosition" &&
+					       propName != "smoothedRotation";
+				};
+				
+				changed |= ReflectionUI::RenderInspector(*comp, filter, &world).changed;
 				
 				if (changed) g_SceneDirty = true;
 			}
@@ -7311,25 +7409,6 @@ namespace Alice
 						ofs << j.dump(4);
 				}
 
-				if (ImGui::MenuItem("Create Material"))
-				{
-					fs::path newPath = path / "NewMaterial.mat";
-					int index = 1;
-					while (fs::exists(newPath))
-					{
-						newPath = path / ("NewMaterial" + std::to_string(index) + ".mat");
-						++index;
-					}
-
-					// JSON(.mat)로 저장 (RTTR + ReflectionSerializer 내부 사용)
-					MaterialComponent mat;
-					mat.color = DirectX::XMFLOAT3(0.7f, 0.7f, 0.7f);
-					mat.roughness = 0.5f;
-					mat.metalness = 0.0f;
-					mat.assetPath = newPath.string();
-					mat.albedoTexturePath.clear();
-					MaterialFile::Save(newPath, mat);
-				}
 
 				if (ImGui::MenuItem("Create Scene"))
 				{
@@ -7344,9 +7423,15 @@ namespace Alice
 					// 기본 씬: 큐브(Transform 1개) + 기본 Material 1개
 					// ForwardRenderSystem은 Transform만 있어도 기본 큐브를 그립니다.
 					World temp;
-					const EntityId e = temp.CreateEntity();
-					temp.AddComponent<TransformComponent>(e);
-					temp.AddComponent<MaterialComponent>(e, DirectX::XMFLOAT3(0.7f, 0.7f, 0.7f));
+					std::string cubeAssetPath = "Assets/Fbx/Cube.fbxasset";
+					EntityId e = InstantiateFbxAssetToWorld(temp, cubeAssetPath, "Cube");
+					if (e == InvalidEntityId)
+					{
+						e = temp.CreateEntity();
+						temp.AddComponent<TransformComponent>(e);
+						temp.AddComponent<MaterialComponent>(e, DirectX::XMFLOAT3(0.7f, 0.7f, 0.7f));
+					}
+
 					SceneFile::Save(temp, newPath);
 				}
 
@@ -8272,6 +8357,706 @@ namespace Alice
 		}
 	}
 
-} 
+	void EditorCore::DrawInspectorAttackDriver(World& world, const EntityId& _selectedEntity)
+	{
+		if (auto* driver = world.GetComponent<AttackDriverComponent>(_selectedEntity))
+		{
+			if (ImGui::CollapsingHeader("Attack Driver", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				bool changed = false;
+
+				if (ImGui::Button("Remove##AttackDriverRemove"))
+				{
+					world.RemoveComponent<AttackDriverComponent>(_selectedEntity);
+					g_SceneDirty = true;
+					return;
+				}
+
+				std::uint64_t traceGuid = driver->traceGuid;
+				if (ImGui::InputScalar("Trace GUID", ImGuiDataType_U64, &traceGuid))
+				{
+					driver->traceGuid = traceGuid;
+					driver->traceCached = InvalidEntityId;
+					changed = true;
+				}
+
+				// Trace entity picker (WeaponTrace 보유 엔티티 위주)
+				{
+					EntityId resolved = (driver->traceGuid != 0) ? world.FindEntityByGuid(driver->traceGuid) : InvalidEntityId;
+					std::string preview = "(self)";
+					if (driver->traceGuid != 0)
+					{
+						if (resolved != InvalidEntityId)
+						{
+							std::string name = world.GetEntityName(resolved);
+							if (name.empty()) name = "Entity " + std::to_string(resolved);
+							preview = name + " (" + std::to_string(driver->traceGuid) + ")";
+						}
+						else
+						{
+							preview = std::to_string(driver->traceGuid);
+						}
+					}
+
+					if (ImGui::BeginCombo("Trace (pick entity)", preview.c_str()))
+					{
+						const bool selSelf = (driver->traceGuid == 0);
+						if (ImGui::Selectable("(self)", selSelf))
+						{
+							driver->traceGuid = 0;
+							driver->traceCached = InvalidEntityId;
+							changed = true;
+						}
+						if (selSelf)
+							ImGui::SetItemDefaultFocus();
+
+						for (auto&& [eid, idc] : world.GetComponents<IDComponent>())
+						{
+							if (!world.GetComponent<WeaponTraceComponent>(eid))
+								continue;
+
+							std::string label = world.GetEntityName(eid);
+							if (label.empty()) label = "Entity " + std::to_string(eid);
+							label += " (";
+							label += std::to_string(idc.guid);
+							label += ")";
+							const bool sel = (idc.guid == driver->traceGuid);
+							if (ImGui::Selectable(label.c_str(), sel))
+							{
+								driver->traceGuid = idc.guid;
+								driver->traceCached = InvalidEntityId;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				// Clip picker (SkinnedMesh animation list)
+				{
+					std::vector<std::string> clipNames;
+					if (m_skinnedRegistry)
+					{
+						if (const auto* skinned = world.GetComponent<SkinnedMeshComponent>(_selectedEntity))
+						{
+							if (!skinned->meshAssetPath.empty())
+							{
+								std::shared_ptr<SkinnedMeshGPU> mesh = m_skinnedRegistry->Find(skinned->meshAssetPath);
+								if (mesh && mesh->sourceModel)
+									clipNames = mesh->sourceModel->GetAnimationNames();
+							}
+						}
+					}
+
+					if (!clipNames.empty())
+					{
+						const char* preview = driver->clipName.empty() ? "(none)" : driver->clipName.c_str();
+						if (ImGui::BeginCombo("Clip", preview))
+						{
+							const bool selNone = driver->clipName.empty();
+							if (ImGui::Selectable("(none)", selNone))
+							{
+								driver->clipName.clear();
+								changed = true;
+							}
+							if (selNone)
+								ImGui::SetItemDefaultFocus();
+
+							for (const auto& name : clipNames)
+							{
+								const bool sel = (driver->clipName == name);
+								if (ImGui::Selectable(name.c_str(), sel))
+								{
+									driver->clipName = name;
+									changed = true;
+								}
+								if (sel)
+									ImGui::SetItemDefaultFocus();
+							}
+							ImGui::EndCombo();
+						}
+					}
+					else
+					{
+						ImGui::TextDisabled("No animation clips available (SkinnedMesh/FBX not ready).");
+					}
+				}
+
+				changed |= ImGui::DragFloat("Start Time (sec)", &driver->startTimeSec, 0.01f, 0.0f, 60.0f);
+				changed |= ImGui::DragFloat("End Time (sec)", &driver->endTimeSec, 0.01f, 0.0f, 60.0f);
+
+				if (driver->endTimeSec < driver->startTimeSec)
+					ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "Warning: End < Start");
+
+				if (changed) g_SceneDirty = true;
+			}
+		}
+	}
+
+	void EditorCore::DrawInspectorHurtbox(World& world, const EntityId& _selectedEntity)
+	{
+		if (auto* hb = world.GetComponent<HurtboxComponent>(_selectedEntity))
+		{
+			if (ImGui::CollapsingHeader("Hurtbox", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				bool changed = false;
+
+				if (ImGui::Button("Remove##HurtboxRemove"))
+				{
+					world.RemoveComponent<HurtboxComponent>(_selectedEntity);
+					g_SceneDirty = true;
+					return;
+				}
+
+				std::uint64_t ownerGuid = hb->ownerGuid;
+				if (ImGui::InputScalar("Owner GUID", ImGuiDataType_U64, &ownerGuid))
+				{
+					hb->ownerGuid = ownerGuid;
+					hb->ownerCached = InvalidEntityId;
+
+					EntityId resolved = (ownerGuid != 0) ? world.FindEntityByGuid(ownerGuid) : InvalidEntityId;
+					if (resolved != InvalidEntityId)
+						hb->ownerNameDebug = world.GetEntityName(resolved);
+					changed = true;
+				}
+
+				if (hb->ownerGuid == 0)
+					ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Owner GUID is 0 -> hurtbox will not resolve");
+
+				// Owner picker
+				{
+					std::string preview = hb->ownerNameDebug.empty()
+						? (hb->ownerGuid != 0 ? std::to_string(hb->ownerGuid) : "(none)")
+						: hb->ownerNameDebug;
+					if (ImGui::BeginCombo("Owner (pick entity)", preview.c_str()))
+					{
+						for (auto&& [eid, idc] : world.GetComponents<IDComponent>())
+						{
+							std::string label = world.GetEntityName(eid);
+							if (label.empty()) label = "Entity " + std::to_string(eid);
+							label += " (";
+							label += std::to_string(idc.guid);
+							label += ")";
+							const bool sel = (idc.guid == hb->ownerGuid);
+							if (ImGui::Selectable(label.c_str(), sel))
+							{
+								hb->ownerGuid = idc.guid;
+								hb->ownerNameDebug = world.GetEntityName(eid);
+								hb->ownerCached = InvalidEntityId;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				ImGui::Text("Owner Name: %s", hb->ownerNameDebug.empty() ? "(none)" : hb->ownerNameDebug.c_str());
+
+				uint32_t teamId = hb->teamId;
+				if (ImGui::InputScalar("Team Id", ImGuiDataType_U32, &teamId))
+				{
+					hb->teamId = teamId;
+					changed = true;
+				}
+
+				uint32_t part = hb->part;
+				if (ImGui::InputScalar("Part", ImGuiDataType_U32, &part))
+				{
+					hb->part = part;
+					changed = true;
+				}
+
+				changed |= ImGui::DragFloat("Damage Scale", &hb->damageScale, 0.01f, 0.0f, 100.0f);
+
+				if (changed) g_SceneDirty = true;
+			}
+		}
+	}
+
+	void EditorCore::DrawInspectorWeaponTrace(World& world, const EntityId& _selectedEntity)
+	{
+		if (auto* trace = world.GetComponent<WeaponTraceComponent>(_selectedEntity))
+		{
+			if (ImGui::CollapsingHeader("Weapon Trace", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				bool changed = false;
+
+				if (ImGui::Button("Remove##WeaponTraceRemove"))
+				{
+					world.RemoveComponent<WeaponTraceComponent>(_selectedEntity);
+					g_SceneDirty = true;
+					return;
+				}
+
+				std::uint64_t ownerGuid = trace->ownerGuid;
+				if (ImGui::InputScalar("Owner GUID", ImGuiDataType_U64, &ownerGuid))
+				{
+					trace->ownerGuid = ownerGuid;
+					trace->ownerCached = InvalidEntityId;
+					EntityId resolved = (ownerGuid != 0) ? world.FindEntityByGuid(ownerGuid) : InvalidEntityId;
+					if (resolved != InvalidEntityId)
+						trace->ownerNameDebug = world.GetEntityName(resolved);
+					changed = true;
+				}
+
+				if (trace->ownerGuid == 0)
+					ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Owner GUID is 0 -> trace will not run");
+
+				if (ImGui::Button("Pick from selected entity"))
+				{
+					if (const auto* idc = world.GetComponent<IDComponent>(_selectedEntity))
+					{
+						trace->ownerGuid = idc->guid;
+						trace->ownerCached = _selectedEntity;
+						trace->ownerNameDebug = world.GetEntityName(_selectedEntity);
+						changed = true;
+					}
+				}
+
+				// Owner picker
+				{
+					std::string preview = trace->ownerNameDebug.empty()
+						? (trace->ownerGuid != 0 ? std::to_string(trace->ownerGuid) : "(none)")
+						: trace->ownerNameDebug;
+					if (ImGui::BeginCombo("Owner (pick entity)", preview.c_str()))
+					{
+						for (auto&& [eid, idc] : world.GetComponents<IDComponent>())
+						{
+							std::string label = world.GetEntityName(eid);
+							if (label.empty()) label = "Entity " + std::to_string(eid);
+							label += " (";
+							label += std::to_string(idc.guid);
+							label += ")";
+							const bool sel = (idc.guid == trace->ownerGuid);
+							if (ImGui::Selectable(label.c_str(), sel))
+							{
+								trace->ownerGuid = idc.guid;
+								trace->ownerNameDebug = world.GetEntityName(eid);
+								trace->ownerCached = InvalidEntityId;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				ImGui::Text("Owner Name: %s", trace->ownerNameDebug.empty() ? "(none)" : trace->ownerNameDebug.c_str());
+
+				changed |= ImGui::Checkbox("Active", &trace->active);
+				changed |= ImGui::Checkbox("Debug Draw", &trace->debugDraw);
+				changed |= ImGui::DragFloat("Radius", &trace->radius, 0.01f, 0.0f, 10.0f);
+
+				uint32_t teamId = trace->teamId;
+				if (ImGui::InputScalar("Team Id", ImGuiDataType_U32, &teamId))
+				{
+					trace->teamId = teamId;
+					changed = true;
+				}
+
+				uint32_t attackId = trace->attackInstanceId;
+				if (ImGui::InputScalar("Attack Instance Id", ImGuiDataType_U32, &attackId))
+				{
+					trace->attackInstanceId = attackId;
+					changed = true;
+				}
+
+				uint32_t targetBits = trace->targetLayerBits;
+				if (ImGui::InputScalar("Target Layer Bits", ImGuiDataType_U32, &targetBits))
+				{
+					trace->targetLayerBits = targetBits;
+					changed = true;
+				}
+
+				uint32_t queryBits = trace->queryLayerBits;
+				if (ImGui::InputScalar("Query Layer Bits", ImGuiDataType_U32, &queryBits))
+				{
+					trace->queryLayerBits = queryBits;
+					changed = true;
+				}
+
+				ImGui::Separator();
+				ImGui::Text("Trace Socket Names");
+
+				for (size_t i = 0; i < trace->traceSocketNames.size();)
+				{
+					ImGui::PushID(static_cast<int>(i));
+					ImGui::TextUnformatted(trace->traceSocketNames[i].c_str());
+					ImGui::SameLine();
+					if (ImGui::Button("Remove"))
+					{
+						trace->traceSocketNames.erase(trace->traceSocketNames.begin() + static_cast<long long>(i));
+						changed = true;
+						ImGui::PopID();
+						continue;
+					}
+					ImGui::PopID();
+					++i;
+				}
+
+				// Add from owner: combo to pick socket name (auto-recognize from owner)
+				EntityId traceOwnerId = (trace->ownerGuid != 0) ? world.FindEntityByGuid(trace->ownerGuid) : trace->ownerCached;
+				if (traceOwnerId != InvalidEntityId)
+				{
+					std::vector<std::string> ownerSocketOptions;
+					auto addOpt = [&ownerSocketOptions](const std::string& value) {
+						if (value.empty()) return;
+						if (std::find(ownerSocketOptions.begin(), ownerSocketOptions.end(), value) == ownerSocketOptions.end())
+							ownerSocketOptions.push_back(value);
+					};
+					if (const auto* sc = world.GetComponent<SocketComponent>(traceOwnerId))
+					{
+						for (const auto& s : sc->sockets)
+						{
+							addOpt(s.name);
+							if (!s.parentBone.empty() && s.parentBone != s.name)
+								addOpt(s.parentBone);
+						}
+					}
+					if (!ownerSocketOptions.empty() && ImGui::BeginCombo("Add from owner socket", "(select to add)"))
+					{
+						for (const auto& name : ownerSocketOptions)
+						{
+							bool already = std::find(trace->traceSocketNames.begin(), trace->traceSocketNames.end(), name) != trace->traceSocketNames.end();
+							if (already)
+								ImGui::BeginDisabled();
+							if (ImGui::Selectable(name.c_str()))
+							{
+								trace->traceSocketNames.push_back(name);
+								changed = true;
+							}
+							if (already)
+							{
+								ImGui::EndDisabled();
+								if (ImGui::IsItemHovered())
+									ImGui::SetTooltip("Already in list");
+							}
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				// Add new socket name input
+				static char newSocketBuf[128]{};
+				ImGui::SetNextItemWidth(200.0f);
+				bool addSocket = ImGui::InputText("##NewSocketName", newSocketBuf, IM_ARRAYSIZE(newSocketBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+				if (addSocket || (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Enter)))
+				{
+					addSocket = true;
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Add##TraceSocket") || addSocket)
+				{
+					std::string newName = newSocketBuf;
+					// Trim whitespace
+					if (!newName.empty())
+					{
+						// Remove leading/trailing whitespace
+						size_t start = newName.find_first_not_of(" \t\n\r");
+						if (start != std::string::npos)
+						{
+							size_t end = newName.find_last_not_of(" \t\n\r");
+							newName = newName.substr(start, end - start + 1);
+						}
+						else
+						{
+							newName.clear();
+						}
+					}
+					
+					if (!newName.empty())
+					{
+						// Check for duplicates
+						bool isDuplicate = std::find(trace->traceSocketNames.begin(), trace->traceSocketNames.end(), newName) != trace->traceSocketNames.end();
+						if (!isDuplicate)
+						{
+							trace->traceSocketNames.push_back(newName);
+							changed = true;
+						}
+						// Clear input regardless of whether it was added
+						newSocketBuf[0] = '\0';
+					}
+				}
+				if (ImGui::IsItemHovered() && !std::string(newSocketBuf).empty())
+				{
+					ImGui::SetTooltip("Press Enter or click Add to add socket name");
+				}
+
+				if (ImGui::Button("Auto-fill Trace/WT sockets"))
+				{
+					EntityId ownerId = (trace->ownerGuid != 0) ? world.FindEntityByGuid(trace->ownerGuid) : trace->ownerCached;
+					if (ownerId != InvalidEntityId)
+					{
+						auto addIfMatch = [&](const std::string& name) {
+							if (name.rfind("Trace_", 0) != 0 && name.rfind("WT_", 0) != 0)
+								return;
+							for (const auto& s : trace->traceSocketNames)
+								if (s == name) return;
+							trace->traceSocketNames.push_back(name);
+							changed = true;
+						};
+
+						if (const auto* sc = world.GetComponent<SocketComponent>(ownerId))
+						{
+							for (const auto& s : sc->sockets)
+								addIfMatch(s.name);
+						}
+					}
+				}
+
+				if (changed) g_SceneDirty = true;
+			}
+		}
+	}
+
+	void EditorCore::DrawInspectorSocketAttachment(World& world, const EntityId& _selectedEntity)
+	{
+		if (auto* att = world.GetComponent<SocketAttachmentComponent>(_selectedEntity))
+		{
+			if (ImGui::CollapsingHeader("Socket Attachment", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				bool changed = false;
+
+				if (ImGui::Button("Remove##SocketAttachmentRemove"))
+				{
+					world.RemoveComponent<SocketAttachmentComponent>(_selectedEntity);
+					g_SceneDirty = true;
+					return;
+				}
+
+				// Owner GUID
+				std::uint64_t ownerGuid = att->ownerGuid;
+				if (ImGui::InputScalar("Owner GUID", ImGuiDataType_U64, &ownerGuid))
+				{
+					att->ownerGuid = ownerGuid;
+					att->ownerCached = InvalidEntityId;
+					changed = true;
+				}
+
+				if (att->ownerGuid == 0)
+					ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Owner GUID is 0 -> attachment will not run");
+
+				// Set owner from list (dropdown of all entities with IDComponent)
+				{
+					std::string preview = att->ownerNameDebug.empty()
+						? (att->ownerGuid != 0 ? std::to_string(att->ownerGuid) : "(none)")
+						: att->ownerNameDebug;
+					if (ImGui::BeginCombo("Owner (pick entity)", preview.c_str()))
+					{
+						for (auto&& [eid, idc] : world.GetComponents<IDComponent>())
+						{
+							std::string label = world.GetEntityName(eid);
+							if (label.empty()) label = "Entity " + std::to_string(eid);
+							label += " (";
+							label += std::to_string(idc.guid);
+							label += ")";
+							const bool sel = (idc.guid == att->ownerGuid);
+							if (ImGui::Selectable(label.c_str(), sel))
+							{
+								att->ownerGuid = idc.guid;
+								att->ownerNameDebug = world.GetEntityName(eid);
+								att->ownerCached = InvalidEntityId;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+
+				// Resolve owner and build socket option list (name + parentBone for fallback match)
+				EntityId resolvedOwner = (att->ownerGuid != 0) ? world.FindEntityByGuid(att->ownerGuid) : InvalidEntityId;
+				std::vector<std::string> socketOptions;
+				if (resolvedOwner != InvalidEntityId)
+				{
+					auto addOption = [&socketOptions](const std::string& value) {
+						if (value.empty()) return;
+						if (std::find(socketOptions.begin(), socketOptions.end(), value) == socketOptions.end())
+							socketOptions.push_back(value);
+					};
+					if (const auto* sc = world.GetComponent<SocketComponent>(resolvedOwner))
+					{
+						for (const auto& s : sc->sockets)
+						{
+							addOption(s.name);
+							if (!s.parentBone.empty() && s.parentBone != s.name)
+								addOption(s.parentBone);
+						}
+					}
+					// Auto-select: if socket name is empty and owner has sockets, set to first option
+					if (att->socketName.empty() && !socketOptions.empty())
+					{
+						att->socketName = socketOptions[0];
+						changed = true;
+					}
+				}
+
+				// Socket: 목록에서 선택만 (문자열 직접 입력 제거)
+				if (!socketOptions.empty())
+				{
+					const char* preview = att->socketName.c_str();
+					if (preview[0] == '\0') preview = "(선택)";
+					if (ImGui::BeginCombo("Socket", preview))
+					{
+						for (const auto& opt : socketOptions)
+						{
+							const bool sel = (att->socketName == opt);
+							if (ImGui::Selectable(opt.c_str(), sel))
+							{
+								att->socketName = opt;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("오너 소켓 목록에서 선택 (이름 또는 parentBone)");
+				}
+				else if (resolvedOwner != InvalidEntityId)
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Owner has no sockets (SocketComponent.sockets 추가)");
+					// 목록 없을 때만 현재값 표시 (읽기 전용)
+					ImGui::Text("Socket Name: %s", att->socketName.empty() ? "(none)" : att->socketName.c_str());
+				}
+				else
+				{
+					// Owner 미지정 시: 안내 + 현재값 표시
+					ImGui::TextDisabled("Owner를 먼저 선택하면 Socket 목록에서 고를 수 있습니다.");
+					ImGui::Text("Socket Name: %s", att->socketName.empty() ? "(none)" : att->socketName.c_str());
+				}
+
+				changed |= ImGui::Checkbox("Follow Scale", &att->followScale);
+				changed |= ImGui::DragFloat3("Extra Pos", &att->extraPos.x, 0.01f);
+				changed |= ImGui::DragFloat3("Extra Rot (rad)", &att->extraRotRad.x, 0.01f);
+				changed |= ImGui::DragFloat3("Extra Scale", &att->extraScale.x, 0.01f);
+
+				ImGui::Separator();
+				ImGui::Text("Debug: Resolved Owner EntityId = %llu", static_cast<unsigned long long>(resolvedOwner == InvalidEntityId ? 0 : resolvedOwner));
+
+				if (changed) g_SceneDirty = true;
+			}
+		}
+	}
+
+	void EditorCore::DrawInspectorSocketComponent(World& world, const EntityId& _selectedEntity)
+	{
+		auto* comp = world.GetComponent<SocketComponent>(_selectedEntity);
+		if (!comp)
+			return;
+
+		if (!ImGui::CollapsingHeader("Sockets", ImGuiTreeNodeFlags_DefaultOpen))
+			return;
+
+		bool changed = false;
+
+		// 본 이름 목록 (동일 엔티티의 SkinnedMesh에서)
+		std::vector<std::string> boneNames;
+		if (m_skinnedRegistry)
+		{
+			if (const auto* skinned = world.GetComponent<SkinnedMeshComponent>(_selectedEntity))
+			{
+				if (!skinned->meshAssetPath.empty())
+				{
+					std::shared_ptr<SkinnedMeshGPU> mesh = m_skinnedRegistry->Find(skinned->meshAssetPath);
+					if (mesh && mesh->sourceModel)
+						boneNames = mesh->sourceModel->GetBoneNames();
+				}
+			}
+		}
+
+		// 소켓 전용 UI: 본 드롭다운, 이름/위치/회전/스케일, + 추가 / 항목별 삭제
+		const size_t size = comp->sockets.size();
+		for (size_t i = 0; i < size; ++i)
+		{
+			SocketDef& s = comp->sockets[i];
+			ImGui::PushID(static_cast<int>(i));
+
+			bool open = ImGui::TreeNode("Socket", "%s [%s]", s.name.empty() ? "(unnamed)" : s.name.c_str(), s.parentBone.empty() ? "?" : s.parentBone.c_str());
+			ImGui::SameLine();
+			if (ImGui::SmallButton("-"))
+			{
+				comp->sockets.erase(comp->sockets.begin() + static_cast<ptrdiff_t>(i));
+				changed = true;
+				ImGui::PopID();
+				if (open) ImGui::TreePop();
+				break;
+			}
+			if (open)
+			{
+				// Name
+				char nameBuf[256];
+				std::snprintf(nameBuf, sizeof(nameBuf), "%.255s", s.name.c_str());
+				if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf)))
+				{
+					s.name = nameBuf;
+					changed = true;
+				}
+
+				// Parent Bone: 드롭다운 (본 목록)
+				int currentBoneIndex = -1;
+				if (!boneNames.empty())
+				{
+					for (size_t k = 0; k < boneNames.size(); ++k)
+						if (boneNames[k] == s.parentBone) { currentBoneIndex = static_cast<int>(k); break; }
+
+					const char* preview = (currentBoneIndex >= 0 && currentBoneIndex < static_cast<int>(boneNames.size()))
+						? boneNames[static_cast<size_t>(currentBoneIndex)].c_str()
+						: (s.parentBone.empty() ? "(선택)" : s.parentBone.c_str());
+					if (ImGui::BeginCombo("Parent Bone", preview))
+					{
+						for (size_t k = 0; k < boneNames.size(); ++k)
+						{
+							const bool sel = (currentBoneIndex == static_cast<int>(k));
+							if (ImGui::Selectable(boneNames[k].c_str(), sel))
+							{
+								s.parentBone = boneNames[k];
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+				else
+				{
+					char boneBuf[256];
+					std::snprintf(boneBuf, sizeof(boneBuf), "%.255s", s.parentBone.c_str());
+					if (ImGui::InputText("Parent Bone", boneBuf, sizeof(boneBuf)))
+					{
+						s.parentBone = boneBuf;
+						changed = true;
+					}
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("SkinnedMesh가 없으면 본 이름을 직접 입력");
+				}
+
+				changed |= ImGui::DragFloat3("Position", &s.position.x, 0.01f);
+				changed |= ImGui::DragFloat3("Rotation (deg)", &s.rotation.x, 1.0f);
+				changed |= ImGui::DragFloat3("Scale", &s.scale.x, 0.01f);
+				ImGui::TreePop();
+			}
+			ImGui::PopID();
+		}
+		if (ImGui::Button("+ Add Socket"))
+		{
+			comp->sockets.push_back(SocketDef{});
+			changed = true;
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("이 오브젝트에 소켓을 추가합니다.");
+
+		if (changed)
+			g_SceneDirty = true;
+	}
+}
 
 
