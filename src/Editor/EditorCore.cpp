@@ -25,11 +25,20 @@
 #include "Components/SkinnedAnimationComponent.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "Components/AttackDriverComponent.h"
+#include "Components/AdvancedAnimationComponent.h"
 #include "Components/HurtboxComponent.h"
 #include "Components/WeaponTraceComponent.h"
 #include "Components/SocketAttachmentComponent.h"
 #include "Components/IDComponent.h"
 #include "Components/SocketComponent.h"
+#include "AliceUI/UIWidgetComponent.h"
+#include "AliceUI/UITransformComponent.h"
+#include "AliceUI/UIImageComponent.h"
+#include "AliceUI/UITextComponent.h"
+#include "AliceUI/UIButtonComponent.h"
+#include "AliceUI/UIGaugeComponent.h"
+#include "AliceUI/UIRenderer.h"
+#include <cstdint>
 #include <cstdio>
 #include <set>
 #include "Components/CameraComponent.h"
@@ -39,6 +48,8 @@
 #include "Components/CameraShakeComponent.h"
 #include "Components/CameraBlendComponent.h"
 #include "Components/CameraInputComponent.h"
+#include "Components/PostProcessVolumeComponent.h"
+#include "Rendering/PostProcessSettings.h"
 #include "Editor/Blueprint/AnimBlueprintEditor.h"
 #include "Game/CombatPhysicsLayers.h"
 
@@ -1834,14 +1845,48 @@ namespace Alice
 
 		ImGui_ImplWin32_Init(hwnd);
 		ImGui_ImplDX11_Init(d3dDevice, d3dContext);
+		ImGui_ImplDX11_CreateDeviceObjects();
+
+		if (m_aliceUIRenderer && io.FontDefault && io.Fonts)
+		{
+			const ImTextureID texId = io.Fonts->TexID.GetTexID();
+			if (texId != ImTextureID_Invalid)
+			{
+				m_aliceUIRenderer->SetDefaultImGuiFont(io.FontDefault,
+					reinterpret_cast<ID3D11ShaderResourceView*>(static_cast<uintptr_t>(texId)));
+			}
+		}
 
 		// ImGuizmo 스타일 설정
 		ImGuizmo::Style& style = ImGuizmo::GetStyle();
 		style.RotationLineThickness = 3.0f;
 		style.RotationOuterLineThickness = 2.0f;
 
+		// Default PostProcess Settings 초기화 및 로드
+		m_defaultPostProcessSettings = PostProcessSettings::FromDefaults();
+		LoadDefaultPostProcessSettings();
+
 		m_initialized = true;
 		return true;
+	}
+
+	void EditorCore::SetAliceUIRenderer(UIRenderer* renderer)
+	{
+		m_aliceUIRenderer = renderer;
+		if (!m_initialized || !m_aliceUIRenderer)
+			return;
+
+		ImGuiIO& io = ImGui::GetIO();
+
+		if (io.FontDefault && io.Fonts)
+		{
+			const ImTextureID texId = io.Fonts->TexID.GetTexID();
+			if (texId != ImTextureID_Invalid)
+			{
+				m_aliceUIRenderer->SetDefaultImGuiFont(io.FontDefault,
+					reinterpret_cast<ID3D11ShaderResourceView*>(static_cast<uintptr_t>(texId)));
+			}
+		}
 	}
 
 	void EditorCore::Shutdown()
@@ -1901,6 +1946,11 @@ namespace Alice
 	{
 		// UIWorldManager 저장
 		m_uiWorldManager = uiWorldManager;
+		
+		// 매 프레임 Default PostProcess Settings를 RenderSystem에 전달
+		deferred.SetDefaultPostProcessSettings(m_defaultPostProcessSettings);
+		// ForwardRenderSystem에도 동일한 함수가 필요하면 추가
+		// forward.SetDefaultPostProcessSettings(m_defaultPostProcessSettings);
 		
 		// SceneManager에서 현재 씬 파일 경로를 조회하여 g_CurrentScenePath 업데이트
 		if (sceneManager)
@@ -2195,6 +2245,65 @@ namespace Alice
                     g_SceneDirty = true;
                     ImGui::CloseCurrentPopup();
                 }
+				if (ImGui::BeginMenu("AliceUI"))
+				{
+					if (ImGui::MenuItem("Screen Image"))
+					{
+						EntityId e = CreateAliceUIImage(world);
+						if (e != InvalidEntityId)
+						{
+							PushCommand(std::make_unique<CreateEntityCommand>(e, "UI Image"));
+							selectedEntity = e;
+							g_SceneDirty = true;
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::MenuItem("Screen Text"))
+					{
+						EntityId e = CreateAliceUIText(world);
+						if (e != InvalidEntityId)
+						{
+							PushCommand(std::make_unique<CreateEntityCommand>(e, "UI Text"));
+							selectedEntity = e;
+							g_SceneDirty = true;
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::MenuItem("Screen Button"))
+					{
+						EntityId e = CreateAliceUIButton(world);
+						if (e != InvalidEntityId)
+						{
+							PushCommand(std::make_unique<CreateEntityCommand>(e, "UI Button"));
+							selectedEntity = e;
+							g_SceneDirty = true;
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::MenuItem("Screen Gauge"))
+					{
+						EntityId e = CreateAliceUIGauge(world);
+						if (e != InvalidEntityId)
+						{
+							PushCommand(std::make_unique<CreateEntityCommand>(e, "UI Gauge"));
+							selectedEntity = e;
+							g_SceneDirty = true;
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					if (ImGui::MenuItem("World Image"))
+					{
+						EntityId e = CreateAliceUIWorldImage(world);
+						if (e != InvalidEntityId)
+						{
+							PushCommand(std::make_unique<CreateEntityCommand>(e, "World UI Image"));
+							selectedEntity = e;
+							g_SceneDirty = true;
+						}
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::EndMenu();
+				}
                 if (ImGui::MenuItem("UI_Image"))
                 {
                     CreateUIImage();
@@ -2739,8 +2848,19 @@ namespace Alice
 				if (children.empty())
 					nodeFlags |= ImGuiTreeNodeFlags_Leaf;
 
-				// 트리 노드 열기
-				bool nodeOpen = ImGui::TreeNodeEx(label.c_str(), nodeFlags);
+			const bool isAliceUI = (world.GetComponent<UIWidgetComponent>(entityId) != nullptr);
+			if (isAliceUI)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.2f, 0.7f, 1.0f));
+			}
+
+			// 트리 노드 열기
+			bool nodeOpen = ImGui::TreeNodeEx(label.c_str(), nodeFlags);
+
+			if (isAliceUI)
+			{
+				ImGui::PopStyleColor();
+			}
 
 				// 선택 처리 (더블클릭으로만 인스펙터 변경 - 드래그앤드롭을 위해)
 				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -2885,6 +3005,14 @@ namespace Alice
 
 			// 루트 엔티티들 가져오기
 			std::vector<EntityId> rootEntities = world.GetRootEntities();
+
+			// AliceUI 엔티티들도 Hierarchy에 포함 (TransformComponent 없는 경우 대비)
+			std::set<EntityId> rootSet(rootEntities.begin(), rootEntities.end());
+			for (auto [id, widget] : world.GetComponents<UIWidgetComponent>())
+			{
+				if (rootSet.insert(id).second)
+					rootEntities.push_back(id);
+			}
 
 			if (rootEntities.empty())
 			{
@@ -3137,6 +3265,13 @@ namespace Alice
 				}
 				else if (selectedEntity == InvalidEntityId) {
 					Alice::ImGuiText(L"선택된 엔티티가 없습니다.");
+					
+					// Default Post Process Settings UI
+					ImGui::Separator();
+					if (ImGui::CollapsingHeader("Default Post Process Settings", ImGuiTreeNodeFlags_DefaultOpen))
+					{
+						DrawDefaultPostProcessSettings();
+					}
 				}
 				else {
 					// World 엔티티 Inspector 표시 (기존 로직)
@@ -3171,6 +3306,9 @@ namespace Alice
 				DrawInspectorPointLight(world, selectedEntity);
 				DrawInspectorSpotLight(world, selectedEntity);
 				DrawInspectorRectLight(world, selectedEntity);
+				
+				// 3-3. Post Process Volume
+				DrawInspectorPostProcessVolume(world, selectedEntity);
 
 				// 3-3. Compute Effect
 				DrawInspectorComputeEffect(world, selectedEntity);
@@ -3472,6 +3610,26 @@ namespace Alice
 				ImVec2 imgMin = ImGui::GetItemRectMin();
 				ImVec2 imgMax = ImGui::GetItemRectMax();
 				ImVec2 imgSize = ImGui::GetItemRectSize();
+
+				if (m_aliceUIRenderer && m_hwnd && imgSize.x > 0.0f && imgSize.y > 0.0f && sceneWidth > 0.0f && sceneHeight > 0.0f)
+				{
+					POINT p = { static_cast<LONG>(imgMin.x), static_cast<LONG>(imgMin.y) };
+					::ScreenToClient(m_hwnd, &p);
+					m_aliceUIRenderer->SetScreenInputRect(
+						static_cast<float>(p.x),
+						static_cast<float>(p.y),
+						imgSize.x,
+						imgSize.y,
+						sceneWidth,
+						sceneHeight);
+
+					ImVec2 mousePos = ImGui::GetMousePos();
+					const float u = (mousePos.x - imgMin.x) / imgSize.x;
+					const float v = (mousePos.y - imgMin.y) / imgSize.y;
+					const float mx = u * sceneWidth;
+					const float my = v * sceneHeight;
+					m_aliceUIRenderer->SetScreenMouseOverride(mx, my);
+				}
 
 				// 프리팹 드래그앤드롭: 뷰포트 이미지 위에 드롭 타겟 추가
 				if (ImGui::BeginDragDropTarget())
@@ -3855,9 +4013,18 @@ namespace Alice
 							XMFLOAT3 newPosition, newRotation, newScale;
 							if (DecomposeLocalMatrix(localMatrix, newPosition, newRotation, newScale))
 							{
-								transform->position = newPosition;
-								transform->rotation = newRotation;  // (x=pitch, y=yaw, z=roll) 라디안
-								transform->scale = newScale;
+								if (gizmoOp == ImGuizmo::TRANSLATE)
+								{
+									transform->position = newPosition;
+								}
+								else if (gizmoOp == ImGuizmo::ROTATE)
+								{
+									transform->rotation = newRotation;  // (x=pitch, y=yaw, z=roll) 라디안
+								}
+								else if (gizmoOp == ImGuizmo::SCALE)
+								{
+									transform->scale = newScale;
+								}
 							}
 
 							// ImGuizmo로 Transform이 변경되었고 물리 컴포넌트가 있으면 텔레포트 자동 활성화
@@ -4158,6 +4325,8 @@ namespace Alice
 			if (ImGui::RadioButton("PBR", mode == 4))       mode = 4;
 			ImGui::SameLine();
 			if (ImGui::RadioButton("ToonPBR", mode == 5))   mode = 5;
+			ImGui::SameLine();
+			if (ImGui::RadioButton("ToonPBREditable", mode == 7)) mode = 7;
 			shadingMode = mode;
 
 			Alice::ImGuiCheckbox(L"Fill Light (보조광)", &useFillLight);
@@ -4168,7 +4337,7 @@ namespace Alice
 			auto& lighting = deferred.GetLightingParameters();
 
 			// PBR 모드일 때 PBR 파라미터 표시
-			if (mode == 4 || mode == 5)
+			if (mode == 4 || mode == 5 || mode == 7)
 			{
 				ImGui::Separator();
 				ImGui::Text("PBR Material Parameters");
@@ -4210,11 +4379,11 @@ namespace Alice
 			ImGui::Separator();
 			ImGui::TextUnformatted("Skybox");
 
-			static int  skyboxChoice = 3; // 0 Off, 1 Bridge, 2 Indoor, 3 Baker
+			static int  skyboxChoice = 3; // 0 Off, 1 Bridge, 2 Indoor, 3 Baker, 4 darkenv
 			static int  lastSkyboxChoice = -1;
 			static bool lastForward = false;
 
-			const char* skyboxItems[] = { "Off", "Bridge", "Indoor", "Baker" };
+			const char* skyboxItems[] = { "Off", "Bridge", "Indoor", "Baker", "darkenv"};
 
 			auto ApplySkybox = [&](auto& renderer)
 			{
@@ -4230,6 +4399,7 @@ namespace Alice
 				case 1: renderer.SetIblSet("Bridge", "bridge");       break;
 				case 2: renderer.SetIblSet("Indoor", "indoor");       break;
 				case 3: renderer.SetIblSet("Sample", "BakerSample");  break;
+				case 4: renderer.SetIblSet("darkenv", "darkenvDiffuseHDR");  break;
 				default: break;
 				}
 			};
@@ -4267,10 +4437,17 @@ namespace Alice
 
 			float exposure = 0.0f;
 			float maxHDRNits = 1000.0f;
+			DirectX::XMFLOAT4 saturation = { 1.0f, 1.0f, 1.0f, 1.0f };
+			DirectX::XMFLOAT4 contrast = { 1.0f, 1.0f, 1.0f, 1.0f };
+			DirectX::XMFLOAT4 gamma = { 1.0f, 1.0f, 1.0f, 1.0f };
+			DirectX::XMFLOAT4 gain = { 1.0f, 1.0f, 1.0f, 1.0f };
 
 			auto DrawPostProcess = [&](auto& renderer)
 			{
+				// Exposure와 MaxHDRNits는 기존 함수로 가져오기
 				renderer.GetPostProcessParams(exposure, maxHDRNits);
+				// Color Grading은 Vector4로 가져오기
+				renderer.GetColorGrading(saturation, contrast, gamma, gain);
 
 				bool changed = false;
 
@@ -4282,13 +4459,109 @@ namespace Alice
 				if (ImGui::IsItemHovered())
 					ImGui::SetTooltip("HDR 모니터 최대 밝기 (nits)\n일반 모니터: 100-300 nits\nHDR 모니터: 1000-10000 nits");
 
+				ImGui::Separator();
+				ImGui::TextUnformatted("Color Grading (RGB 채널별 제어)");
+				
+				// ImGui::ColorEdit4는 float[4] 배열을 받지만, XMFLOAT4는 구조체이므로 배열로 변환 필요
+				// ImGuiFlags 설정: Alpha 슬라이더 숨김, Inputs 표시
+				ImGui::PushItemWidth(-1);
+
+				ImGui::Text("Saturation (RGB)");
+				changed |= ImGui::ColorEdit4("Saturation (RGB)", reinterpret_cast<float*>(&saturation),
+					ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("채도 (R,G,B 채널별): 0.0 = 흑백, 1.0 = 원본, 2.0+ = 과포화\nW 채널은 항상 1.0으로 유지됩니다.");
+
+				ImGui::Text("Contrast (RGB)");
+				changed |= ImGui::ColorEdit4("Contrast (RGB)", reinterpret_cast<float*>(&contrast),
+					ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("대비 (R,G,B 채널별): 0.0 = 회색, 1.0 = 원본, 2.0 = 고대비\nW 채널은 항상 1.0으로 유지됩니다.");
+				
+				ImGui::Text("Gamma (RGB)");
+				changed |= ImGui::ColorEdit4("Gamma (RGB)", reinterpret_cast<float*>(&gamma),
+					ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("감마 보정 (R,G,B 채널별): 1.0 = 원본, <1.0 = 밝게, >1.0 = 어둡게\nW 채널은 항상 1.0으로 유지됩니다.");
+
+				ImGui::Text("Gain (RGB)");
+				changed |= ImGui::ColorEdit4("Gain (RGB)", reinterpret_cast<float*>(&gain),
+					ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Gain Multiply 스케일 (R,G,B 채널별): 0.0 = 검정, 1.0 = 원본, >1.0 = 밝게\nW 채널은 항상 1.0으로 유지됩니다.");
+				ImGui::PopItemWidth();
+
+				// W 채널은 항상 1.0으로 유지
+				saturation.w = 1.0f;
+				contrast.w = 1.0f;
+				gamma.w = 1.0f;
+				gain.w = 1.0f;
+
 				if (changed)
+				{
+					// Exposure와 MaxHDRNits는 기존 함수로 설정
 					renderer.SetPostProcessParams(exposure, maxHDRNits);
+					// Color Grading은 Vector4로 설정
+					renderer.ApplyColorGrading(saturation, contrast, gamma, gain);
+				}
 			};
 
 			if (useForwardRendering) DrawPostProcess(forward);
 			else                     DrawPostProcess(deferred);
 
+			// === Post Process Volume Reference Object ===
+			if (!useForwardRendering)
+			{
+				ImGui::Separator();
+				ImGui::TextUnformatted("Post Process Volume Reference");
+				ImGui::Separator();
+
+				static char refObjectNameBuf[256] = "";
+				std::string currentRefName = deferred.GetPPVReferenceObjectName();
+				if (strcmp(refObjectNameBuf, currentRefName.c_str()) != 0)
+				{
+					strncpy_s(refObjectNameBuf, currentRefName.c_str(), sizeof(refObjectNameBuf) - 1);
+					refObjectNameBuf[sizeof(refObjectNameBuf) - 1] = '\0';
+				}
+
+				if (ImGui::InputText("PPV Reference GameObject Name", refObjectNameBuf, sizeof(refObjectNameBuf)))
+				{
+					deferred.SetPPVReferenceObjectName(refObjectNameBuf);
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("PostProcessVolume 보간 기준이 될 GameObject 이름\n비어있으면 카메라 위치 사용");
+
+				// 현재 바인딩 상태 표시
+				if (!currentRefName.empty())
+				{
+					GameObject refObj = world.FindGameObject(currentRefName);
+					if (refObj.IsValid())
+					{
+						auto* transform = world.GetComponent<TransformComponent>(refObj.id());
+						if (transform && transform->enabled)
+						{
+							ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), 
+								"Bound to: %s (Position: %.2f, %.2f, %.2f)", 
+								currentRefName.c_str(), 
+								transform->position.x, transform->position.y, transform->position.z);
+						}
+						else
+						{
+							ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), 
+								"Bound to: %s (Transform not found or disabled)", currentRefName.c_str());
+						}
+					}
+					else
+					{
+						ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), 
+							"Object not found: %s (using camera position)", currentRefName.c_str());
+					}
+				}
+				else
+				{
+					ImGui::TextDisabled("Using camera position as reference");
+				}
+			}
 
 			// === Bloom (Deferred 전용) ===
 			if (!useForwardRendering)
@@ -4308,10 +4581,15 @@ namespace Alice
 
 				if (bloomSettings.enabled)
 				{
-					if (ImGui::SliderFloat("Intensity", &bloomSettings.intensity, 0.0f, 5.0f, "%.2f"))
+					if (ImGui::SliderFloat("Bloom Intensity", &bloomSettings.intensity, 0.0f, 5.0f, "%.2f"))
 						bloomChanged = true;
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("Bloom 합성 강도 (0.0 ~ 5.0)\n값이 클수록 더 밝게 합성됩니다");
+						ImGui::SetTooltip("Bloom 합성 강도 (0.0 ~ 5.0)\n최종 합성 단계에서 적용되는 강도\n값이 클수록 더 밝게 합성됩니다");
+
+					if (ImGui::SliderFloat("Gaussian Intensity", &bloomSettings.gaussianIntensity, 0.0f, 5.0f, "%.2f"))
+						bloomChanged = true;
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("Gaussian 블러 강도 (0.0 ~ 5.0)\n블러 단계에서 적용되는 강도\n값이 클수록 블러 결과가 더 밝아집니다");
 
 					if (ImGui::SliderFloat("Threshold", &bloomSettings.threshold, 0.0f, 5.0f, "%.2f"))
 						bloomChanged = true;
@@ -4438,6 +4716,14 @@ namespace Alice
 					}
 
 					g_SceneDirty = true;
+				}
+			}
+			else
+			{
+				if (m_aliceUIRenderer)
+				{
+					m_aliceUIRenderer->ClearScreenInputRect();
+					m_aliceUIRenderer->ClearScreenMouseOverride();
 				}
 			}
 			ImGui::End();
@@ -5069,6 +5355,7 @@ namespace Alice
 				typeName == "PointLightComponent" ||
 				typeName == "SpotLightComponent" ||
 				typeName == "RectLightComponent" ||
+				typeName == "PostProcessVolumeComponent" ||
 				typeName == "SkinnedMeshComponent" ||
 				typeName == "SkinnedAnimationComponent")  // Animation Status 섹션에서 처리됨
 				continue;
@@ -5367,21 +5654,38 @@ namespace Alice
 			}
 			changed |= ReflectionUI::RenderInspector(*mat, MaterialInspectorFilter).changed;
 
-			const char* shadingItems[] = {
-				"Global",
-				"Lambert",
-				"Phong",
-				"Blinn-Phong",
-				"Toon",
-				"PBR",
-				"ToonPBR",
-				"OnlyTextureWithOutline"
-			};
-			int shadingIndex = mat->shadingMode + 1; // -1 -> 0 (Global)
-			shadingIndex = std::clamp(shadingIndex, 0, (int)(std::size(shadingItems) - 1));
-			if (ImGui::Combo("Shading", &shadingIndex, shadingItems, (int)std::size(shadingItems)))
+			struct ShadingItem
 			{
-				mat->shadingMode = shadingIndex - 1;
+				const char* label;
+				int value;
+			};
+			const ShadingItem shadingItems[] = {
+				{ "Global", -1 },
+				{ "Lambert", 0 },
+				{ "Phong", 1 },
+				{ "Blinn-Phong", 2 },
+				{ "Toon", 3 },
+				{ "PBR", 4 },
+				{ "ToonPBR", 5 },
+				{ "ToonPBREditable", 7 },
+				{ "OnlyTextureWithOutline", 6 }
+			};
+			int shadingIndex = 0;
+			for (int i = 0; i < (int)std::size(shadingItems); ++i)
+			{
+				if (shadingItems[i].value == mat->shadingMode)
+				{
+					shadingIndex = i;
+					break;
+				}
+			}
+			if (ImGui::Combo("Shading", &shadingIndex, [](void* data, int idx, const char** out_text) {
+				auto* items = static_cast<const ShadingItem*>(data);
+				*out_text = items[idx].label;
+				return true;
+			}, (void*)shadingItems, (int)std::size(shadingItems)))
+			{
+				mat->shadingMode = shadingItems[shadingIndex].value;
 				changed = true;
 			}
 
@@ -5524,6 +5828,558 @@ namespace Alice
 
 				if (ImGui::Button("Remove Rect Light")) {
 					world.RemoveComponent<RectLightComponent>(_selectedEntity);
+					g_SceneDirty = true;
+					return;
+				}
+
+				if (changed) g_SceneDirty = true;
+			}
+		}
+	}
+
+	void EditorCore::DrawDefaultPostProcessSettings()
+	{
+		PostProcessSettings& settings = m_defaultPostProcessSettings;
+		bool changed = false;
+
+		// 저장/로드 버튼
+		ImGui::Text("Default Post Process Settings");
+		if (ImGui::Button("Save to EngineSettings.json"))
+		{
+			SaveDefaultPostProcessSettings();
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("현재 설정을 EngineSettings.json에 저장합니다.");
+		
+		ImGui::SameLine();
+		if (ImGui::Button("Load from EngineSettings.json"))
+		{
+			LoadDefaultPostProcessSettings();
+		}
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("EngineSettings.json에서 설정을 불러옵니다.");
+
+		ImGui::Separator();
+
+		// Exposure
+		if (ImGui::TreeNode("Exposure##DefaultPostProcess"))
+		{
+			changed |= ImGui::SliderFloat("Exposure##DefaultPostProcess", &settings.exposure, -3.0f, 3.0f, "%.2f");
+			ImGui::TreePop();
+		}
+
+		// Max HDR Nits
+		if (ImGui::TreeNode("Max HDR Nits##DefaultPostProcess"))
+		{
+			changed |= ImGui::SliderFloat("Max HDR Nits##DefaultPostProcess", &settings.maxHDRNits, 100.0f, 10000.0f, "%.0f nits");
+			ImGui::TreePop();
+		}
+
+		// Color Grading
+		if (ImGui::TreeNode("Color Grading##DefaultPostProcess"))
+		{
+			ImGui::Text("Saturation (RGB)");
+			changed |= ImGui::ColorEdit3("Saturation (RGB)##DefaultPostProcess", &settings.saturation.x,
+				ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+
+			ImGui::Text("Contrast (RGB)");
+			changed |= ImGui::ColorEdit3("Contrast (RGB)##DefaultPostProcess", &settings.contrast.x,
+				ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+
+			ImGui::Text("Gamma (RGB)");
+			changed |= ImGui::ColorEdit3("Gamma (RGB)##DefaultPostProcess", &settings.gamma.x,
+				ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+
+			ImGui::Text("Gain (RGB)");
+			changed |= ImGui::ColorEdit3("Gain (RGB)##DefaultPostProcess", &settings.gain.x,
+				ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+
+			ImGui::TreePop();
+		}
+
+		// Bloom
+		if (ImGui::TreeNode("Bloom##DefaultPostProcess"))
+		{
+			changed |= ImGui::SliderFloat("Bloom Threshold##DefaultPostProcess", &settings.bloomThreshold, 0.0f, 5.0f);
+			changed |= ImGui::SliderFloat("Bloom Knee##DefaultPostProcess", &settings.bloomKnee, 0.0f, 1.0f);
+			changed |= ImGui::SliderFloat("Bloom Intensity##DefaultPostProcess", &settings.bloomIntensity, 0.0f, 5.0f);
+			changed |= ImGui::SliderFloat("Bloom Gaussian Intensity##DefaultPostProcess", &settings.bloomGaussianIntensity, 0.0f, 5.0f);
+			changed |= ImGui::SliderFloat("Bloom Radius##DefaultPostProcess", &settings.bloomRadius, 0.0f, 10.0f);
+			changed |= ImGui::SliderInt("Bloom Downsample##DefaultPostProcess", &settings.bloomDownsample, 1, 8);
+			ImGui::TreePop();
+		}
+
+		if (changed)
+		{
+			// 변경사항이 있으면 자동 저장 (선택사항)
+			// SaveDefaultPostProcessSettings();
+		}
+	}
+
+	void EditorCore::SaveDefaultPostProcessSettings()
+	{
+		namespace fs = std::filesystem;
+		
+		// 프로젝트 루트 경로 계산
+		wchar_t exePathW[MAX_PATH] = {};
+		GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
+		fs::path exePath = exePathW;
+		fs::path exeDir = exePath.parent_path();
+		fs::path projectRoot = exeDir.parent_path().parent_path().parent_path(); // build/bin/Debug → 프로젝트 루트
+		fs::path settingsPath = projectRoot / "EngineSettings.json";
+
+		try
+		{
+			nlohmann::json j;
+			
+			// 기존 파일이 있으면 읽기
+			if (fs::exists(settingsPath))
+			{
+				std::ifstream ifs(settingsPath);
+				if (ifs.is_open())
+				{
+					ifs >> j;
+					ifs.close();
+				}
+			}
+
+			// Default PostProcess Settings 저장
+			nlohmann::json ppSettings;
+			ppSettings["exposure"] = m_defaultPostProcessSettings.exposure;
+			ppSettings["maxHDRNits"] = m_defaultPostProcessSettings.maxHDRNits;
+			ppSettings["saturation"] = { m_defaultPostProcessSettings.saturation.x, m_defaultPostProcessSettings.saturation.y, m_defaultPostProcessSettings.saturation.z };
+			ppSettings["contrast"] = { m_defaultPostProcessSettings.contrast.x, m_defaultPostProcessSettings.contrast.y, m_defaultPostProcessSettings.contrast.z };
+			ppSettings["gamma"] = { m_defaultPostProcessSettings.gamma.x, m_defaultPostProcessSettings.gamma.y, m_defaultPostProcessSettings.gamma.z };
+			ppSettings["gain"] = { m_defaultPostProcessSettings.gain.x, m_defaultPostProcessSettings.gain.y, m_defaultPostProcessSettings.gain.z };
+			ppSettings["bloomThreshold"] = m_defaultPostProcessSettings.bloomThreshold;
+			ppSettings["bloomKnee"] = m_defaultPostProcessSettings.bloomKnee;
+			ppSettings["bloomIntensity"] = m_defaultPostProcessSettings.bloomIntensity;
+			ppSettings["bloomGaussianIntensity"] = m_defaultPostProcessSettings.bloomGaussianIntensity;
+			ppSettings["bloomRadius"] = m_defaultPostProcessSettings.bloomRadius;
+			ppSettings["bloomDownsample"] = m_defaultPostProcessSettings.bloomDownsample;
+
+			j["defaultPostProcess"] = ppSettings;
+
+			// 파일 저장
+			std::ofstream ofs(settingsPath);
+			if (ofs.is_open())
+			{
+				ofs << j.dump(4);
+				ofs.close();
+				ALICE_LOG_INFO("Default PostProcess Settings saved to EngineSettings.json");
+			}
+			else
+			{
+				ALICE_LOG_ERRORF("Failed to save Default PostProcess Settings to %s", settingsPath.string().c_str());
+			}
+		}
+		catch (const std::exception& e)
+		{
+			ALICE_LOG_ERRORF("Exception while saving Default PostProcess Settings: %s", e.what());
+		}
+	}
+
+	void EditorCore::LoadDefaultPostProcessSettings()
+	{
+		namespace fs = std::filesystem;
+		
+		// 프로젝트 루트 경로 계산
+		wchar_t exePathW[MAX_PATH] = {};
+		GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
+		fs::path exePath = exePathW;
+		fs::path exeDir = exePath.parent_path();
+		fs::path projectRoot = exeDir.parent_path().parent_path().parent_path(); // build/bin/Debug → 프로젝트 루트
+		fs::path settingsPath = projectRoot / "EngineSettings.json";
+
+		try
+		{
+			if (!fs::exists(settingsPath))
+			{
+				// 파일이 없으면 기본값 유지
+				return;
+			}
+
+			std::ifstream ifs(settingsPath);
+			if (!ifs.is_open())
+			{
+				return;
+			}
+
+			nlohmann::json j;
+			ifs >> j;
+			ifs.close();
+
+			// Default PostProcess Settings 로드
+			if (j.contains("defaultPostProcess"))
+			{
+				const auto& ppSettings = j["defaultPostProcess"];
+				
+				if (ppSettings.contains("exposure"))
+					m_defaultPostProcessSettings.exposure = ppSettings["exposure"].get<float>();
+				if (ppSettings.contains("maxHDRNits"))
+					m_defaultPostProcessSettings.maxHDRNits = ppSettings["maxHDRNits"].get<float>();
+				
+				if (ppSettings.contains("saturation") && ppSettings["saturation"].is_array() && ppSettings["saturation"].size() >= 3)
+				{
+					m_defaultPostProcessSettings.saturation.x = ppSettings["saturation"][0].get<float>();
+					m_defaultPostProcessSettings.saturation.y = ppSettings["saturation"][1].get<float>();
+					m_defaultPostProcessSettings.saturation.z = ppSettings["saturation"][2].get<float>();
+				}
+				
+				if (ppSettings.contains("contrast") && ppSettings["contrast"].is_array() && ppSettings["contrast"].size() >= 3)
+				{
+					m_defaultPostProcessSettings.contrast.x = ppSettings["contrast"][0].get<float>();
+					m_defaultPostProcessSettings.contrast.y = ppSettings["contrast"][1].get<float>();
+					m_defaultPostProcessSettings.contrast.z = ppSettings["contrast"][2].get<float>();
+				}
+				
+				if (ppSettings.contains("gamma") && ppSettings["gamma"].is_array() && ppSettings["gamma"].size() >= 3)
+				{
+					m_defaultPostProcessSettings.gamma.x = ppSettings["gamma"][0].get<float>();
+					m_defaultPostProcessSettings.gamma.y = ppSettings["gamma"][1].get<float>();
+					m_defaultPostProcessSettings.gamma.z = ppSettings["gamma"][2].get<float>();
+				}
+				
+				if (ppSettings.contains("gain") && ppSettings["gain"].is_array() && ppSettings["gain"].size() >= 3)
+				{
+					m_defaultPostProcessSettings.gain.x = ppSettings["gain"][0].get<float>();
+					m_defaultPostProcessSettings.gain.y = ppSettings["gain"][1].get<float>();
+					m_defaultPostProcessSettings.gain.z = ppSettings["gain"][2].get<float>();
+				}
+				
+				if (ppSettings.contains("bloomThreshold"))
+					m_defaultPostProcessSettings.bloomThreshold = ppSettings["bloomThreshold"].get<float>();
+				if (ppSettings.contains("bloomKnee"))
+					m_defaultPostProcessSettings.bloomKnee = ppSettings["bloomKnee"].get<float>();
+				if (ppSettings.contains("bloomIntensity"))
+					m_defaultPostProcessSettings.bloomIntensity = ppSettings["bloomIntensity"].get<float>();
+				if (ppSettings.contains("bloomGaussianIntensity"))
+					m_defaultPostProcessSettings.bloomGaussianIntensity = ppSettings["bloomGaussianIntensity"].get<float>();
+				if (ppSettings.contains("bloomRadius"))
+					m_defaultPostProcessSettings.bloomRadius = ppSettings["bloomRadius"].get<float>();
+				if (ppSettings.contains("bloomDownsample"))
+					m_defaultPostProcessSettings.bloomDownsample = ppSettings["bloomDownsample"].get<int>();
+
+				ALICE_LOG_INFO("Default PostProcess Settings loaded from EngineSettings.json");
+			}
+		}
+		catch (const std::exception& e)
+		{
+			ALICE_LOG_ERRORF("Exception while loading Default PostProcess Settings: %s", e.what());
+		}
+	}
+
+	void EditorCore::DrawInspectorPostProcessVolume(World& world, const EntityId& _selectedEntity)
+	{
+		if (auto* volume = world.GetComponent<PostProcessVolumeComponent>(_selectedEntity))
+		{
+			if (ImGui::CollapsingHeader("Post Process Volume", ImGuiTreeNodeFlags_DefaultOpen))
+			{
+				bool changed = false;
+
+				// ==== Unbound 설정 (최상단) ====
+				ImGui::Text("Volume Type");
+				changed |= ImGui::Checkbox("Unbound (전역 적용)##PostProcessVolume", &volume->unbound);
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("Unbound: ON이면 항상 전역 적용 (무한 범위)\nOFF이면 Shape + BlendRadius 기반 공간 적용");
+				
+				if (volume->unbound)
+				{
+					ImGui::SameLine();
+					ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f), "[전역 적용 중]");
+				}
+				else
+				{
+					ImGui::SameLine();
+					ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "[공간 기반 적용]");
+				}
+
+				ImGui::Separator();
+
+				// ==== Bound 설정 (Unbound OFF일 때만 의미 있음) ====
+				if (volume->unbound)
+				{
+					// Unbound ON: Shape/BlendRadius 비활성화
+					ImGui::BeginDisabled();
+				}
+
+				// ==== Shape 설정 ====
+				ImGui::Text("Shape");
+				const char* shapeNames[] = { "Box", "Sphere" };
+				int currentShape = static_cast<int>(volume->shape);
+				if (ImGui::Combo("Shape##PostProcessVolume", &currentShape, shapeNames, IM_ARRAYSIZE(shapeNames)))
+				{
+					volume->SetShape(static_cast<PostProcessVolumeShape>(currentShape));
+					changed = true;
+				}
+				if (volume->unbound && ImGui::IsItemHovered())
+					ImGui::SetTooltip("Unbound가 켜져 있어 Shape는 적용되지 않습니다.");
+
+				if (volume->shape == PostProcessVolumeShape::Box)
+				{
+					DirectX::XMFLOAT3 boxSize = volume->GetBoxSize();
+					if (ImGui::SliderFloat3("Box Size##PostProcessVolume", &boxSize.x, 0.1f, 100.0f))
+					{
+						volume->SetBoxSize(boxSize);
+						changed = true;
+					}
+				}
+				else if (volume->shape == PostProcessVolumeShape::Sphere)
+				{
+					float radius = volume->GetSphereRadius();
+					if (ImGui::SliderFloat("Sphere Radius##PostProcessVolume", &radius, 0.1f, 50.0f))
+					{
+						volume->SetSphereRadius(radius);
+						changed = true;
+					}
+				}
+
+				ImGui::Separator();
+
+				// ==== 블렌딩 파라미터 ====
+				ImGui::Text("Blending");
+				float blendRadius = volume->GetBlendRadius();
+				if (ImGui::SliderFloat("Blend Radius##PostProcessVolume", &blendRadius, 0.0f, 50.0f))
+				{
+					volume->SetBlendRadius(blendRadius);
+					changed = true;
+				}
+				if (ImGui::IsItemHovered())
+				{
+					if (volume->unbound)
+						ImGui::SetTooltip("Unbound가 켜져 있어 BlendRadius는 적용되지 않습니다.");
+					else
+						ImGui::SetTooltip("볼륨 외부에서도 블렌딩되는 거리 (0이면 내부에서만 적용)");
+				}
+
+				if (volume->unbound)
+				{
+					ImGui::EndDisabled();
+				}
+
+				float blendWeight = volume->GetBlendWeight();
+				if (ImGui::SliderFloat("Blend Weight##PostProcessVolume", &blendWeight, 0.0f, 1.0f))
+				{
+					volume->SetBlendWeight(blendWeight);
+					changed = true;
+				}
+
+				int priority = volume->GetPriority();
+				if (ImGui::InputInt("Priority##PostProcessVolume", &priority))
+				{
+					volume->SetPriority(priority);
+					changed = true;
+				}
+				if (ImGui::IsItemHovered())
+					ImGui::SetTooltip("우선순위: 높을수록 나중에 블렌딩되어 영향이 큼");
+
+				ImGui::Separator();
+
+				// ==== Post Process Settings ====
+				ImGui::Text("Post Process Settings");
+				PostProcessSettings& settings = volume->settings;
+
+				// Exposure
+				if (ImGui::TreeNode("Exposure##PostProcessVolume"))
+				{
+					changed |= ImGui::Checkbox("Override Exposure##PostProcessVolume", &settings.bOverride_Exposure);
+					if (settings.bOverride_Exposure)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Exposure##PostProcessVolume", &settings.exposure, -3.0f, 3.0f, "%.2f");
+						ImGui::Unindent();
+					}
+					ImGui::TreePop();
+				}
+
+				// Max HDR Nits
+				if (ImGui::TreeNode("Max HDR Nits##PostProcessVolume"))
+				{
+					changed |= ImGui::Checkbox("Override Max HDR Nits##PostProcessVolume", &settings.bOverride_MaxHDRNits);
+					if (settings.bOverride_MaxHDRNits)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Max HDR Nits##PostProcessVolume", &settings.maxHDRNits, 100.0f, 10000.0f, "%.0f nits");
+						ImGui::Unindent();
+					}
+					ImGui::TreePop();
+				}
+
+				// Color Grading
+				if (ImGui::TreeNode("Color Grading##PostProcessVolume"))
+				{
+					// Saturation
+					changed |= ImGui::Checkbox("Override Saturation##PostProcessVolume", &settings.bOverride_ColorGradingSaturation);
+					if (settings.bOverride_ColorGradingSaturation)
+					{
+						ImGui::Indent();
+						changed |= ImGui::ColorEdit3("Saturation (RGB)##PostProcessVolume", &settings.saturation.x,
+							ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+						ImGui::Unindent();
+					}
+
+					// Contrast
+					changed |= ImGui::Checkbox("Override Contrast##PostProcessVolume", &settings.bOverride_ColorGradingContrast);
+					if (settings.bOverride_ColorGradingContrast)
+					{
+						ImGui::Indent();
+						changed |= ImGui::ColorEdit3("Contrast (RGB)##PostProcessVolume", &settings.contrast.x,
+							ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+						ImGui::Unindent();
+					}
+
+					// Gamma
+					changed |= ImGui::Checkbox("Override Gamma##PostProcessVolume", &settings.bOverride_ColorGradingGamma);
+					if (settings.bOverride_ColorGradingGamma)
+					{
+						ImGui::Indent();
+						changed |= ImGui::ColorEdit3("Gamma (RGB)##PostProcessVolume", &settings.gamma.x,
+							ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+						ImGui::Unindent();
+					}
+
+					// Gain
+					changed |= ImGui::Checkbox("Override Gain##PostProcessVolume", &settings.bOverride_ColorGradingGain);
+					if (settings.bOverride_ColorGradingGain)
+					{
+						ImGui::Indent();
+						changed |= ImGui::ColorEdit3("Gain (RGB)##PostProcessVolume", &settings.gain.x,
+							ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_InputRGB | ImGuiColorEditFlags_Float);
+						ImGui::Unindent();
+					}
+
+					ImGui::TreePop();
+				}
+
+				// Bloom
+				if (ImGui::TreeNode("Bloom##PostProcessVolume"))
+				{
+					changed |= ImGui::Checkbox("Override Threshold##PostProcessVolume", &settings.bOverride_BloomThreshold);
+					if (settings.bOverride_BloomThreshold)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Threshold##PostProcessVolume", &settings.bloomThreshold, 0.0f, 5.0f);
+						ImGui::Unindent();
+					}
+
+					changed |= ImGui::Checkbox("Override Knee##PostProcessVolume", &settings.bOverride_BloomKnee);
+					if (settings.bOverride_BloomKnee)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Knee##PostProcessVolume", &settings.bloomKnee, 0.0f, 1.0f);
+						ImGui::Unindent();
+					}
+
+					changed |= ImGui::Checkbox("Override Intensity##PostProcessVolume", &settings.bOverride_BloomIntensity);
+					if (settings.bOverride_BloomIntensity)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Intensity##PostProcessVolume", &settings.bloomIntensity, 0.0f, 5.0f);
+						ImGui::Unindent();
+					}
+
+					changed |= ImGui::Checkbox("Override Gaussian Intensity##PostProcessVolume", &settings.bOverride_BloomGaussianIntensity);
+					if (settings.bOverride_BloomGaussianIntensity)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Gaussian Intensity##PostProcessVolume", &settings.bloomGaussianIntensity, 0.0f, 5.0f);
+						ImGui::Unindent();
+					}
+
+					changed |= ImGui::Checkbox("Override Radius##PostProcessVolume", &settings.bOverride_BloomRadius);
+					if (settings.bOverride_BloomRadius)
+					{
+						ImGui::Indent();
+						changed |= ImGui::SliderFloat("Radius##PostProcessVolume", &settings.bloomRadius, 0.1f, 10.0f);
+						ImGui::Unindent();
+					}
+
+					changed |= ImGui::Checkbox("Override Downsample##PostProcessVolume", &settings.bOverride_BloomDownsample);
+					if (settings.bOverride_BloomDownsample)
+					{
+						ImGui::Indent();
+						const char* downsampleNames[] = { "1x", "2x", "4x" };
+						int downsampleValues[] = { 1, 2, 4 };
+						int currentDownsample = settings.bloomDownsample;
+						int currentIndex = 0;
+						for (int i = 0; i < IM_ARRAYSIZE(downsampleValues); ++i)
+						{
+							if (downsampleValues[i] == currentDownsample)
+							{
+								currentIndex = i;
+								break;
+							}
+						}
+						if (ImGui::Combo("Downsample##PostProcessVolume", &currentIndex, downsampleNames, IM_ARRAYSIZE(downsampleNames)))
+						{
+							settings.bloomDownsample = downsampleValues[currentIndex];
+							changed = true;
+						}
+						ImGui::Unindent();
+					}
+
+					ImGui::TreePop();
+				}
+
+				ImGui::Separator();
+
+				// ==== 참조 오브젝트 설정 ====
+				if (ImGui::TreeNode("Reference Object##PostProcessVolume"))
+				{
+					changed |= ImGui::Checkbox("Use Reference Object##PostProcessVolume", &volume->useReferenceObject);
+					if (ImGui::IsItemHovered())
+						ImGui::SetTooltip("PostProcessVolume 보간 기준을 참조 오브젝트로 사용할지 여부\n비활성화하면 카메라 위치 사용");
+
+					if (volume->useReferenceObject)
+					{
+						ImGui::Indent();
+						char nameBuf[256] = {};
+						strncpy_s(nameBuf, volume->referenceObjectName.c_str(), sizeof(nameBuf) - 1);
+						if (ImGui::InputText("Reference GameObject Name##PostProcessVolume", nameBuf, sizeof(nameBuf)))
+						{
+							volume->SetReferenceObjectName(nameBuf);
+							changed = true;
+						}
+						if (ImGui::IsItemHovered())
+							ImGui::SetTooltip("PostProcessVolume 보간 기준이 될 GameObject 이름\n비어있으면 카메라 위치 사용");
+
+						if (!volume->referenceObjectName.empty())
+						{
+							GameObject refObj = world.FindGameObject(volume->referenceObjectName);
+							if (refObj.IsValid())
+							{
+								auto* transform = world.GetComponent<TransformComponent>(refObj.id());
+								if (transform && transform->enabled)
+								{
+									ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.3f, 1.0f),
+										"Bound to: %s (Position: %.2f, %.2f, %.2f)",
+										volume->referenceObjectName.c_str(),
+										transform->position.x, transform->position.y, transform->position.z);
+								}
+								else
+								{
+									ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f),
+										"Bound to: %s (Transform not found or disabled)", volume->referenceObjectName.c_str());
+								}
+							}
+							else
+							{
+								ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+									"Object not found: %s (using camera position)", volume->referenceObjectName.c_str());
+							}
+						}
+						else
+						{
+							ImGui::TextDisabled("No reference object set (using camera position)");
+						}
+						ImGui::Unindent();
+					}
+					ImGui::TreePop();
+				}
+
+				if (ImGui::Button("Remove Post Process Volume"))
+				{
+					world.RemoveComponent<PostProcessVolumeComponent>(_selectedEntity);
 					g_SceneDirty = true;
 					return;
 				}
@@ -5827,6 +6683,8 @@ namespace Alice
 					return;
 				}
 
+				changed |= ImGui::Checkbox("Debug Draw", &collider->debugDraw);
+
 				// Collider Type 선택
 				ImGui::Text("Collider Type");
 				ImGui::Indent();
@@ -5977,6 +6835,8 @@ namespace Alice
 					g_SceneDirty = true;
 					return;
 				}
+
+				changed |= ImGui::Checkbox("Debug Draw", &meshCollider->debugDraw);
 
 				// Mesh Collider Type 선택
 				ImGui::Text("Mesh Collider Type");
@@ -7997,6 +8857,98 @@ namespace Alice
 		}
 	}
 
+	EntityId EditorCore::CreateAliceUIRoot(World& world, std::string_view name)
+	{
+		EntityId e = world.CreateEntity();
+		world.SetEntityName(e, std::string(name));
+
+		UIWidgetComponent& widget = world.AddComponent<UIWidgetComponent>(e);
+		widget.widgetName = std::string(name);
+		widget.space = AliceUI::UISpace::Screen;
+
+		UITransformComponent& t = world.AddComponent<UITransformComponent>(e);
+		t.anchorMin = DirectX::XMFLOAT2(0.5f, 0.5f);
+		t.anchorMax = DirectX::XMFLOAT2(0.5f, 0.5f);
+		t.position = DirectX::XMFLOAT2(0.0f, 0.0f);
+		t.size = DirectX::XMFLOAT2(200.0f, 80.0f);
+		t.pivot = DirectX::XMFLOAT2(0.5f, 0.5f);
+
+		return e;
+	}
+
+	EntityId EditorCore::CreateAliceUIImage(World& world)
+	{
+		EntityId e = CreateAliceUIRoot(world, "UI_Image");
+		if (e != InvalidEntityId)
+		{
+			world.AddComponent<UIImageComponent>(e);
+		}
+		return e;
+	}
+
+	EntityId EditorCore::CreateAliceUIText(World& world)
+	{
+		EntityId e = CreateAliceUIRoot(world, "UI_Text");
+		if (e != InvalidEntityId)
+		{
+			UITextComponent& text = world.AddComponent<UITextComponent>(e);
+			text.text = "Text";
+			text.fontPath = "Resource/Fonts/NotoSansKR-Regular.ttf";
+		}
+		return e;
+	}
+
+	EntityId EditorCore::CreateAliceUIButton(World& world)
+	{
+		EntityId e = CreateAliceUIRoot(world, "UI_Button");
+		if (e != InvalidEntityId)
+		{
+			world.AddComponent<UIButtonComponent>(e);
+			world.AddComponent<UIImageComponent>(e);
+			UITextComponent& text = world.AddComponent<UITextComponent>(e);
+			text.text = "Button";
+			text.fontPath = "Resource/Fonts/NotoSansKR-Regular.ttf";
+			UITransformComponent* t = world.GetComponent<UITransformComponent>(e);
+			if (t)
+				t->size = DirectX::XMFLOAT2(220.0f, 60.0f);
+		}
+		return e;
+	}
+
+	EntityId EditorCore::CreateAliceUIGauge(World& world)
+	{
+		EntityId e = CreateAliceUIRoot(world, "UI_Gauge");
+		if (e != InvalidEntityId)
+		{
+			world.AddComponent<UIGaugeComponent>(e);
+			UITransformComponent* t = world.GetComponent<UITransformComponent>(e);
+			if (t)
+				t->size = DirectX::XMFLOAT2(260.0f, 24.0f);
+		}
+		return e;
+	}
+
+	EntityId EditorCore::CreateAliceUIWorldImage(World& world)
+	{
+		EntityId e = world.CreateEntity();
+		world.SetEntityName(e, "World_UI_Image");
+
+		auto& widget = world.AddComponent<UIWidgetComponent>(e);
+		widget.widgetName = "World_UI_Image";
+		widget.space = AliceUI::UISpace::World;
+		widget.billboard = true;
+
+		auto& uiTransform = world.AddComponent<UITransformComponent>(e);
+		uiTransform.size = DirectX::XMFLOAT2(0.6f, 0.6f);
+
+		world.AddComponent<UIImageComponent>(e);
+
+		TransformComponent& t = world.AddComponent<TransformComponent>(e);
+		t.position = DirectX::XMFLOAT3(0.0f, 2.0f, 0.0f);
+
+		return e;
+	}
+
 
 	void EditorCore::RenderUIHeirarcy()
 {
@@ -8437,6 +9389,7 @@ namespace Alice
 				// Clip picker (SkinnedMesh animation list)
 				{
 					std::vector<std::string> clipNames;
+					const auto* animComp = world.GetComponent<AdvancedAnimationComponent>(_selectedEntity);
 					if (m_skinnedRegistry)
 					{
 						if (const auto* skinned = world.GetComponent<SkinnedMeshComponent>(_selectedEntity))
@@ -8450,45 +9403,148 @@ namespace Alice
 						}
 					}
 
-					if (!clipNames.empty())
+					ImGui::Separator();
+					ImGui::Text("Clip Timings");
+					if (ImGui::Button("+ Add Clip"))
 					{
-						const char* preview = driver->clipName.empty() ? "(none)" : driver->clipName.c_str();
-						if (ImGui::BeginCombo("Clip", preview))
+						driver->clips.emplace_back();
+						changed = true;
+					}
+
+					auto ResolveClipNameForUI = [&](const AttackDriverClip& clip) -> std::string {
+						if (!animComp)
+							return clip.clipName;
+
+						switch (clip.source)
 						{
-							const bool selNone = driver->clipName.empty();
-							if (ImGui::Selectable("(none)", selNone))
+						case AttackDriverClipSource::BaseA: return animComp->base.clipA;
+						case AttackDriverClipSource::BaseB: return animComp->base.clipB;
+						case AttackDriverClipSource::UpperA: return animComp->upper.clipA;
+						case AttackDriverClipSource::UpperB: return animComp->upper.clipB;
+						case AttackDriverClipSource::Additive: return animComp->additive.clip;
+						case AttackDriverClipSource::Explicit:
+						default: return clip.clipName;
+						}
+					};
+
+					for (size_t i = 0; i < driver->clips.size(); ++i)
+					{
+						AttackDriverClip& clip = driver->clips[i];
+						ImGui::PushID(static_cast<int>(i));
+
+						const std::string resolvedName = ResolveClipNameForUI(clip);
+						const char* clipPreview = resolvedName.empty() ? "(none)" : resolvedName.c_str();
+						bool open = ImGui::TreeNode("Clip", "%s [%.2f - %.2f]", clipPreview, clip.startTimeSec, clip.endTimeSec);
+
+						ImGui::SameLine();
+						bool moveUp = ImGui::SmallButton("^");
+						ImGui::SameLine();
+						bool moveDown = ImGui::SmallButton("v");
+						ImGui::SameLine();
+						bool duplicate = ImGui::SmallButton("Dup");
+						ImGui::SameLine();
+						bool remove = ImGui::SmallButton("Remove");
+
+						if (moveUp && i > 0)
+						{
+							std::swap(driver->clips[i - 1], driver->clips[i]);
+							changed = true;
+							ImGui::PopID();
+							if (open) ImGui::TreePop();
+							continue;
+						}
+						if (moveDown && (i + 1) < driver->clips.size())
+						{
+							std::swap(driver->clips[i + 1], driver->clips[i]);
+							changed = true;
+							ImGui::PopID();
+							if (open) ImGui::TreePop();
+							continue;
+						}
+						if (duplicate)
+						{
+							driver->clips.insert(driver->clips.begin() + static_cast<ptrdiff_t>(i + 1), clip);
+							changed = true;
+							ImGui::PopID();
+							if (open) ImGui::TreePop();
+							continue;
+						}
+						if (remove)
+						{
+							driver->clips.erase(driver->clips.begin() + static_cast<ptrdiff_t>(i));
+							changed = true;
+							ImGui::PopID();
+							if (open) ImGui::TreePop();
+							continue;
+						}
+
+						if (open)
+						{
+							changed |= ImGui::Checkbox("Enabled", &clip.enabled);
+
+							const char* sourceLabels[] = { "Explicit", "Base A", "Base B", "Upper A", "Upper B", "Additive" };
+							int sourceIndex = static_cast<int>(clip.source);
+							if (ImGui::Combo("Source", &sourceIndex, sourceLabels, IM_ARRAYSIZE(sourceLabels)))
 							{
-								driver->clipName.clear();
+								clip.source = static_cast<AttackDriverClipSource>(sourceIndex);
 								changed = true;
 							}
-							if (selNone)
-								ImGui::SetItemDefaultFocus();
 
-							for (const auto& name : clipNames)
+							if (clip.source == AttackDriverClipSource::Explicit)
 							{
-								const bool sel = (driver->clipName == name);
-								if (ImGui::Selectable(name.c_str(), sel))
+								if (!clipNames.empty())
 								{
-									driver->clipName = name;
-									changed = true;
+									if (ImGui::BeginCombo("Clip", clip.clipName.empty() ? "(none)" : clip.clipName.c_str()))
+									{
+										const bool selNone = clip.clipName.empty();
+										if (ImGui::Selectable("(none)", selNone))
+										{
+											clip.clipName.clear();
+											changed = true;
+										}
+										if (selNone)
+											ImGui::SetItemDefaultFocus();
+
+										for (const auto& name : clipNames)
+										{
+											const bool sel = (clip.clipName == name);
+											if (ImGui::Selectable(name.c_str(), sel))
+											{
+												clip.clipName = name;
+												changed = true;
+											}
+											if (sel)
+												ImGui::SetItemDefaultFocus();
+										}
+										ImGui::EndCombo();
+									}
 								}
-								if (sel)
-									ImGui::SetItemDefaultFocus();
+								else
+								{
+									ImGui::TextDisabled("No animation clips available (SkinnedMesh/FBX not ready).");
+								}
 							}
-							ImGui::EndCombo();
+							else
+							{
+								ImGui::Text("Clip: %s", resolvedName.empty() ? "(none)" : resolvedName.c_str());
+							}
+
+							changed |= ImGui::DragFloat("Start Time (sec)", &clip.startTimeSec, 0.01f, 0.0f, 60.0f);
+							changed |= ImGui::DragFloat("End Time (sec)", &clip.endTimeSec, 0.01f, 0.0f, 60.0f);
+
+							if (clip.endTimeSec < clip.startTimeSec)
+							{
+								clip.endTimeSec = clip.startTimeSec;
+								changed = true;
+								ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "Warning: End < Start");
+							}
+
+							ImGui::TreePop();
 						}
-					}
-					else
-					{
-						ImGui::TextDisabled("No animation clips available (SkinnedMesh/FBX not ready).");
+
+						ImGui::PopID();
 					}
 				}
-
-				changed |= ImGui::DragFloat("Start Time (sec)", &driver->startTimeSec, 0.01f, 0.0f, 60.0f);
-				changed |= ImGui::DragFloat("End Time (sec)", &driver->endTimeSec, 0.01f, 0.0f, 60.0f);
-
-				if (driver->endTimeSec < driver->startTimeSec)
-					ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "Warning: End < Start");
 
 				if (changed) g_SceneDirty = true;
 			}
@@ -8648,9 +9704,70 @@ namespace Alice
 
 				ImGui::Text("Owner Name: %s", trace->ownerNameDebug.empty() ? "(none)" : trace->ownerNameDebug.c_str());
 
+				std::uint64_t basisGuid = trace->traceBasisGuid;
+				if (ImGui::InputScalar("Trace Basis GUID", ImGuiDataType_U64, &basisGuid))
+				{
+					trace->traceBasisGuid = basisGuid;
+					trace->traceBasisCached = InvalidEntityId;
+					changed = true;
+				}
+
+				if (trace->traceBasisGuid == 0)
+					ImGui::TextDisabled("Trace Basis GUID is 0 -> uses self");
+
+				// Trace basis picker
+				{
+					std::string preview;
+					if (trace->traceBasisGuid == 0)
+					{
+						preview = "(self)";
+					}
+					else
+					{
+						EntityId resolved = world.FindEntityByGuid(trace->traceBasisGuid);
+						preview = (resolved != InvalidEntityId)
+							? world.GetEntityName(resolved)
+							: std::to_string(trace->traceBasisGuid);
+						if (preview.empty())
+							preview = std::to_string(trace->traceBasisGuid);
+					}
+
+					if (ImGui::BeginCombo("Trace Basis (pick entity)", preview.c_str()))
+					{
+						const bool selfSel = (trace->traceBasisGuid == 0);
+						if (ImGui::Selectable("(self)", selfSel))
+						{
+							trace->traceBasisGuid = 0;
+							trace->traceBasisCached = InvalidEntityId;
+							changed = true;
+						}
+						if (selfSel)
+							ImGui::SetItemDefaultFocus();
+
+						for (auto&& [eid, idc] : world.GetComponents<IDComponent>())
+						{
+							std::string label = world.GetEntityName(eid);
+							if (label.empty()) label = "Entity " + std::to_string(eid);
+							label += " (";
+							label += std::to_string(idc.guid);
+							label += ")";
+							const bool sel = (idc.guid == trace->traceBasisGuid);
+							if (ImGui::Selectable(label.c_str(), sel))
+							{
+								trace->traceBasisGuid = idc.guid;
+								trace->traceBasisCached = InvalidEntityId;
+								changed = true;
+							}
+							if (sel)
+								ImGui::SetItemDefaultFocus();
+						}
+						ImGui::EndCombo();
+					}
+				}
+
 				changed |= ImGui::Checkbox("Active", &trace->active);
 				changed |= ImGui::Checkbox("Debug Draw", &trace->debugDraw);
-				changed |= ImGui::DragFloat("Radius", &trace->radius, 0.01f, 0.0f, 10.0f);
+				changed |= ImGui::DragFloat("Base Damage", &trace->baseDamage, 0.1f, 0.0f, 100000.0f);
 
 				uint32_t teamId = trace->teamId;
 				if (ImGui::InputScalar("Team Id", ImGuiDataType_U32, &teamId))
@@ -8680,133 +9797,115 @@ namespace Alice
 					changed = true;
 				}
 
-				ImGui::Separator();
-				ImGui::Text("Trace Socket Names");
-
-				for (size_t i = 0; i < trace->traceSocketNames.size();)
+				uint32_t subSteps = trace->subSteps;
+				if (ImGui::InputScalar("Sub Steps", ImGuiDataType_U32, &subSteps))
 				{
+					trace->subSteps = std::max(1u, subSteps);
+					changed = true;
+				}
+
+				ImGui::Separator();
+				ImGui::Text("Trace Shapes");
+				if (ImGui::Button("Add Shape"))
+				{
+					trace->shapes.emplace_back();
+					changed = true;
+				}
+
+				for (size_t i = 0; i < trace->shapes.size(); ++i)
+				{
+					WeaponTraceShape& shape = trace->shapes[i];
 					ImGui::PushID(static_cast<int>(i));
-					ImGui::TextUnformatted(trace->traceSocketNames[i].c_str());
+
+					const char* typeName = (shape.type == WeaponTraceShapeType::Sphere)
+						? "Sphere"
+						: (shape.type == WeaponTraceShapeType::Capsule ? "Capsule" : "Box");
+					const char* namePreview = shape.name.empty() ? "(unnamed)" : shape.name.c_str();
+					bool open = ImGui::TreeNode("Shape", "%s [%s]", namePreview, typeName);
+
 					ImGui::SameLine();
-					if (ImGui::Button("Remove"))
+					bool moveUp = ImGui::SmallButton("^");
+					ImGui::SameLine();
+					bool moveDown = ImGui::SmallButton("v");
+					ImGui::SameLine();
+					bool duplicate = ImGui::SmallButton("Dup");
+					ImGui::SameLine();
+					bool remove = ImGui::SmallButton("Remove");
+
+					if (moveUp && i > 0)
 					{
-						trace->traceSocketNames.erase(trace->traceSocketNames.begin() + static_cast<long long>(i));
+						std::swap(trace->shapes[i - 1], trace->shapes[i]);
 						changed = true;
 						ImGui::PopID();
+						if (open) ImGui::TreePop();
 						continue;
 					}
+					if (moveDown && (i + 1) < trace->shapes.size())
+					{
+						std::swap(trace->shapes[i + 1], trace->shapes[i]);
+						changed = true;
+						ImGui::PopID();
+						if (open) ImGui::TreePop();
+						continue;
+					}
+					if (duplicate)
+					{
+						trace->shapes.insert(trace->shapes.begin() + static_cast<ptrdiff_t>(i + 1), shape);
+						changed = true;
+						ImGui::PopID();
+						if (open) ImGui::TreePop();
+						continue;
+					}
+					if (remove)
+					{
+						trace->shapes.erase(trace->shapes.begin() + static_cast<ptrdiff_t>(i));
+						changed = true;
+						ImGui::PopID();
+						if (open) ImGui::TreePop();
+						continue;
+					}
+
+					if (open)
+					{
+						char nameBuf[256];
+						std::snprintf(nameBuf, sizeof(nameBuf), "%.255s", shape.name.c_str());
+						if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf)))
+						{
+							shape.name = nameBuf;
+							changed = true;
+						}
+
+						changed |= ImGui::Checkbox("Enabled", &shape.enabled);
+
+						const char* typeItems[] = { "Sphere", "Capsule", "Box" };
+						int typeIdx = static_cast<int>(shape.type);
+						if (ImGui::Combo("Type", &typeIdx, typeItems, IM_ARRAYSIZE(typeItems)))
+						{
+							shape.type = static_cast<WeaponTraceShapeType>(typeIdx);
+							changed = true;
+						}
+
+						changed |= ImGui::DragFloat3("Local Pos", &shape.localPos.x, 0.01f);
+						changed |= ImGui::DragFloat3("Local Rot (deg)", &shape.localRotDeg.x, 0.5f);
+
+						if (shape.type == WeaponTraceShapeType::Sphere)
+						{
+							changed |= ImGui::DragFloat("Radius", &shape.radius, 0.01f, 0.0f, 100.0f);
+						}
+						else if (shape.type == WeaponTraceShapeType::Capsule)
+						{
+							changed |= ImGui::DragFloat("Radius", &shape.radius, 0.01f, 0.0f, 100.0f);
+							changed |= ImGui::DragFloat("Half Height", &shape.capsuleHalfHeight, 0.01f, 0.0f, 100.0f);
+						}
+						else if (shape.type == WeaponTraceShapeType::Box)
+						{
+							changed |= ImGui::DragFloat3("Half Extents", &shape.boxHalfExtents.x, 0.01f, 0.0f, 100.0f);
+						}
+
+						ImGui::TreePop();
+					}
+
 					ImGui::PopID();
-					++i;
-				}
-
-				// Add from owner: combo to pick socket name (auto-recognize from owner)
-				EntityId traceOwnerId = (trace->ownerGuid != 0) ? world.FindEntityByGuid(trace->ownerGuid) : trace->ownerCached;
-				if (traceOwnerId != InvalidEntityId)
-				{
-					std::vector<std::string> ownerSocketOptions;
-					auto addOpt = [&ownerSocketOptions](const std::string& value) {
-						if (value.empty()) return;
-						if (std::find(ownerSocketOptions.begin(), ownerSocketOptions.end(), value) == ownerSocketOptions.end())
-							ownerSocketOptions.push_back(value);
-					};
-					if (const auto* sc = world.GetComponent<SocketComponent>(traceOwnerId))
-					{
-						for (const auto& s : sc->sockets)
-						{
-							addOpt(s.name);
-							if (!s.parentBone.empty() && s.parentBone != s.name)
-								addOpt(s.parentBone);
-						}
-					}
-					if (!ownerSocketOptions.empty() && ImGui::BeginCombo("Add from owner socket", "(select to add)"))
-					{
-						for (const auto& name : ownerSocketOptions)
-						{
-							bool already = std::find(trace->traceSocketNames.begin(), trace->traceSocketNames.end(), name) != trace->traceSocketNames.end();
-							if (already)
-								ImGui::BeginDisabled();
-							if (ImGui::Selectable(name.c_str()))
-							{
-								trace->traceSocketNames.push_back(name);
-								changed = true;
-							}
-							if (already)
-							{
-								ImGui::EndDisabled();
-								if (ImGui::IsItemHovered())
-									ImGui::SetTooltip("Already in list");
-							}
-						}
-						ImGui::EndCombo();
-					}
-				}
-
-				// Add new socket name input
-				static char newSocketBuf[128]{};
-				ImGui::SetNextItemWidth(200.0f);
-				bool addSocket = ImGui::InputText("##NewSocketName", newSocketBuf, IM_ARRAYSIZE(newSocketBuf), ImGuiInputTextFlags_EnterReturnsTrue);
-				if (addSocket || (ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Enter)))
-				{
-					addSocket = true;
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Add##TraceSocket") || addSocket)
-				{
-					std::string newName = newSocketBuf;
-					// Trim whitespace
-					if (!newName.empty())
-					{
-						// Remove leading/trailing whitespace
-						size_t start = newName.find_first_not_of(" \t\n\r");
-						if (start != std::string::npos)
-						{
-							size_t end = newName.find_last_not_of(" \t\n\r");
-							newName = newName.substr(start, end - start + 1);
-						}
-						else
-						{
-							newName.clear();
-						}
-					}
-					
-					if (!newName.empty())
-					{
-						// Check for duplicates
-						bool isDuplicate = std::find(trace->traceSocketNames.begin(), trace->traceSocketNames.end(), newName) != trace->traceSocketNames.end();
-						if (!isDuplicate)
-						{
-							trace->traceSocketNames.push_back(newName);
-							changed = true;
-						}
-						// Clear input regardless of whether it was added
-						newSocketBuf[0] = '\0';
-					}
-				}
-				if (ImGui::IsItemHovered() && !std::string(newSocketBuf).empty())
-				{
-					ImGui::SetTooltip("Press Enter or click Add to add socket name");
-				}
-
-				if (ImGui::Button("Auto-fill Trace/WT sockets"))
-				{
-					EntityId ownerId = (trace->ownerGuid != 0) ? world.FindEntityByGuid(trace->ownerGuid) : trace->ownerCached;
-					if (ownerId != InvalidEntityId)
-					{
-						auto addIfMatch = [&](const std::string& name) {
-							if (name.rfind("Trace_", 0) != 0 && name.rfind("WT_", 0) != 0)
-								return;
-							for (const auto& s : trace->traceSocketNames)
-								if (s == name) return;
-							trace->traceSocketNames.push_back(name);
-							changed = true;
-						};
-
-						if (const auto* sc = world.GetComponent<SocketComponent>(ownerId))
-						{
-							for (const auto& s : sc->sockets)
-								addIfMatch(s.name);
-						}
-					}
 				}
 
 				if (changed) g_SceneDirty = true;
@@ -9058,5 +10157,3 @@ namespace Alice
 			g_SceneDirty = true;
 	}
 }
-
-

@@ -2,6 +2,7 @@
 
 #include "Rendering/D3D11/D3D11RenderDevice.h"
 #include "Rendering/DebugDrawSystem.h"
+#include "Rendering/DebugDrawComponentSystem.h"
 #include "Rendering/EffectSystem.h"
 #include "Rendering/TrailEffectRenderSystem.h"
 
@@ -37,6 +38,8 @@
 #include "Rendering/D3D11/ID3D11RenderDevice.h"
 #include "Rendering/ForwardRenderSystem.h"
 #include "Rendering/DeferredRenderSystem.h"
+
+#include "AliceUI/UIRenderer.h"
 #include "Rendering/ComputeEffectSystem.h"
 #include "Rendering/SkinnedMeshRegistry.h"
 #include "Editor/ViewportPicker.h"
@@ -55,7 +58,6 @@
 
 #include "PhysX/Module/PhysicsModule.h" // 물리 모듈
 #include "PhysX/PhysicsSystem.h" // 물리 시스템
-#include "PhysX/Module/PhysicsDebug.h" // 물리 디버그 드로우
 
 //UI
 #include "UI/UIWorldManager.h"
@@ -88,7 +90,8 @@ namespace Alice
 			BlinnPhong = 2,
 			Toon = 3,
 			PBR = 4,
-			ToonPBR = 5
+			ToonPBR = 5,
+			ToonPBREditable = 7
 		};
 
 		HINSTANCE m_hInstance = nullptr;
@@ -105,6 +108,7 @@ namespace Alice
 
 		World          m_world;
 		UIWorldManager m_uiWorld;
+		UIRenderer     m_aliceUIRenderer;
 		Camera         m_camera;
 		InputSystem    m_inputSystem;
 		GameTimer      m_timer;
@@ -150,6 +154,7 @@ namespace Alice
 		std::unique_ptr<DeferredRenderSystem> m_deferredRenderSystem;
 		std::unique_ptr<class DebugDrawSystem> m_debugDrawSystem;
 		std::unique_ptr<class DebugDrawSystem> m_gizmoDrawSystem;
+		DebugDrawComponentSystem m_debugDrawComponentSystem;
 		std::unique_ptr<class EffectSystem> m_effectSystem;
 		std::unique_ptr<class TrailEffectRenderSystem> m_trailRenderSystem;
 		std::unique_ptr<ComputeEffectSystem> m_computeEffectSystem;
@@ -398,6 +403,7 @@ namespace Alice
 
 		// 3) Editor/기타가 물리를 참조하면 여기서 먼저 정리
 		pImpl->m_editorCore.Shutdown();
+		pImpl->m_aliceUIRenderer.Shutdown();
 
 		// 4) 마지막에 PhysX 컨텍스트 종료
 		pImpl->m_physics.ShutdownContext();
@@ -513,6 +519,8 @@ namespace Alice
 		pImpl->m_forwardRenderSystem->SetResourceManager(&pImpl->m_resourceManager);
 		pImpl->m_forwardRenderSystem->SetSkinnedMeshRegistry(&pImpl->m_skinnedMeshRegistry);
 
+		pImpl->m_attackDriverSystem.SetSkinnedMeshRegistry(&pImpl->m_skinnedMeshRegistry);
+
 		if (!pImpl->m_forwardRenderSystem->Initialize(pImpl->m_width, pImpl->m_height))
 		{
 			ALICE_LOG_ERRORF("pImpl->m_forwardRenderSystem->Initialize: fail...");
@@ -578,6 +586,19 @@ namespace Alice
 
 				// UI 초기화 완료 로그
 				ALICE_LOG_INFO("[Debug] UIWorldManager initialized (before scene load).");
+
+				// AliceUI 초기화 (D2D 없이 셰이더 기반)
+				if (!pImpl->m_aliceUIRenderer.Initialize(device, context, &pImpl->m_resourceManager))
+				{
+					ALICE_LOG_ERRORF("[AliceUI] UIRenderer Initialize failed.");
+				}
+				if (pImpl->m_forwardRenderSystem)
+					pImpl->m_forwardRenderSystem->SetUIRenderer(&pImpl->m_aliceUIRenderer);
+				if (pImpl->m_deferredRenderSystem)
+					pImpl->m_deferredRenderSystem->SetUIRenderer(&pImpl->m_aliceUIRenderer);
+
+				if (pImpl->m_editorMode)
+					pImpl->m_editorCore.SetAliceUIRenderer(&pImpl->m_aliceUIRenderer);
 			}
 			else
 			{
@@ -911,6 +932,8 @@ namespace Alice
 		
 		// 5. UI 업데이트
 		pImpl->m_uiWorld.Update(pImpl->m_width, pImpl->m_height);
+		pImpl->m_aliceUIRenderer.Update(pImpl->m_world, pImpl->m_inputSystem, pImpl->m_camera,
+			static_cast<float>(pImpl->m_width), static_cast<float>(pImpl->m_height));
 
 	}
 
@@ -1352,12 +1375,18 @@ namespace Alice
 				);
 			}
 
+			pImpl->m_debugDrawComponentSystem.Build(
+				pImpl->m_world,
+				dbg,
+				gizmo,
+				pImpl->m_selectedEntity,
+				pImpl->m_debugDraw,
+				true
+			);
+
 			// 나머지 디버그 요소 (항상 보이도록 오버레이)
 			if (dbg && pImpl->m_debugDraw)
 			{
-				// 물리 콜라이더 와이어프레임 그리기
-				PhysicsDebug::DrawColliders(pImpl->m_world, *dbg);
-
 				// === FBX/SkinnedMesh 디버그 AABB 박스 ===
 				// - SkinnedMeshRegistry의 sourceModel(FbxModel)에서 로컬 AABB를 얻어,
 				//   엔티티 Transform(S*R*T)을 적용한 OBB(로컬 AABB의 월드 변환)를 라인으로 표시합니다.
@@ -1428,40 +1457,6 @@ namespace Alice
 						: DirectX::XMFLOAT4(1.f, 1.f, 0.f, 1.f);
 
 					AddBoxLines(worldCorners, col);
-				}
-
-				// SoundBox: 월드 기준 AABB 를 박스로 시각화
-				for (const auto& [entityId, box] : pImpl->m_world.GetComponents<SoundBoxComponent>())
-				{
-					// 선택된 엔티티 또는 debugDraw가 켜져있을 때만 그림
-					if (entityId != pImpl->m_selectedEntity && !box.debugDraw)
-						continue;
-
-					const auto* t = pImpl->m_world.GetComponent<TransformComponent>(entityId);
-					DirectX::XMFLOAT3 p = t ? t->position : DirectX::XMFLOAT3(0, 0, 0);
-					DirectX::XMFLOAT3 s = t ? t->scale : DirectX::XMFLOAT3(1, 1, 1);
-
-					DirectX::XMFLOAT3 mn{
-						box.boundsMin.x * s.x + p.x,
-						box.boundsMin.y * s.y + p.y,
-						box.boundsMin.z * s.z + p.z
-					};
-					DirectX::XMFLOAT3 mx{
-						box.boundsMax.x * s.x + p.x,
-						box.boundsMax.y * s.y + p.y,
-						box.boundsMax.z * s.z + p.z
-					};
-
-					DirectX::XMFLOAT3 corners[8] = {
-						{mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mn.y, mx.z}, {mn.x, mn.y, mx.z},
-						{mn.x, mx.y, mn.z}, {mx.x, mx.y, mn.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z}
-					};
-
-					const DirectX::XMFLOAT4 col = (entityId == pImpl->m_selectedEntity)
-						? DirectX::XMFLOAT4(0.f, 1.f, 1.f, 1.f)
-						: DirectX::XMFLOAT4(0.f, 0.5f, 1.f, 1.f);
-
-					AddBoxLines(corners, col);
 				}
 
 				// AudioSource: 감쇠 반경 시각화
@@ -1717,6 +1712,7 @@ namespace Alice
 					DeferredRenderSystem* deferred = pImpl->m_deferredRenderSystem.get();
 					ID3D11ShaderResourceView* sceneSRV = deferred->GetSceneColorSRV();
 					deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
+					deferred->RenderPostProcess(backBufferRTV, viewport);
 				}
 
 				// 파티클 오버레이 합성 (톤매핑 후)
@@ -1725,6 +1721,9 @@ namespace Alice
 				{
 					pImpl->m_forwardRenderSystem->RenderParticleOverlay(particleSRV, backBufferRTV, viewport);
 				}
+
+				// UI 렌더링: 최상단
+				pImpl->m_aliceUIRenderer.RenderScreen(pImpl->m_world, pImpl->m_camera, backBufferRTV, viewport.Width, viewport.Height);
 			}
 		}
 		else if (!pImpl->m_editorMode)
@@ -1742,24 +1741,23 @@ namespace Alice
 				{
 					pImpl->m_forwardRenderSystem->RenderToneMapping(backBufferRTV, viewport);
 					// UI 렌더링: Post-processing 이후
-					pImpl->m_uiWorld.Render();  // D2D → UI 텍스처 렌더링
-					pImpl->m_forwardRenderSystem->RenderUI(pImpl->m_uiWorld, backBufferRTV, viewport);
+					pImpl->m_aliceUIRenderer.RenderScreen(pImpl->m_world, pImpl->m_camera, backBufferRTV, viewport.Width, viewport.Height);
 				}
 				else
 				{
 					DeferredRenderSystem* deferred = pImpl->m_deferredRenderSystem.get();
 					ID3D11ShaderResourceView* sceneSRV = deferred->GetSceneColorSRV();
-					if (deferred->GetBloomSettings().enabled)
-					{
-						deferred->RenderBloomPass(sceneSRV, backBufferRTV, viewport);
-					}
-					else
-					{
-						deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
-					}
+					//if (deferred->GetBloomSettings().enabled)
+					//{
+					//	deferred->RenderBloomPass(sceneSRV, backBufferRTV, viewport);
+					//}
+					//else
+					//{
+						//deferred->RenderToneMapping(sceneSRV, backBufferRTV, viewport);
+					deferred->RenderPostProcess(backBufferRTV, viewport);
+
 					// UI 렌더링: Post-processing 이후
-					pImpl->m_uiWorld.Render();  // D2D → UI 텍스처 렌더링
-					deferred->RenderUI(pImpl->m_uiWorld, backBufferRTV, viewport);
+					pImpl->m_aliceUIRenderer.RenderScreen(pImpl->m_world, pImpl->m_camera, backBufferRTV, viewport.Width, viewport.Height);
 				}
 			}
 		}
